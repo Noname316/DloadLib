@@ -1,12 +1,4 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { mangalibConfig } from '../../services/mangalib/config.js';
-import { ranobelibConfig } from '../../services/ranobelib/config.js';
-
-vi.mock('../../core/BrowserApi.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('extensionApi'));
-vi.mock('../../core/DownloadHistory.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('DownloadHistory'));
-vi.mock('../../services/ServiceRegistry.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('serviceRegistry'));
-
-let HistoryController;
 
 function setupDOM() {
     document.body.innerHTML = `
@@ -21,17 +13,18 @@ function setupDOM() {
 beforeEach(async () => {
     vi.resetModules();
     setupDOM();
-    global.extensionApi = { tabs: { create: vi.fn() } };
+    global.browser = { tabs: { create: vi.fn() } };
+    global.chrome = undefined;
     global.DownloadHistory = { getAll: vi.fn(() => []), clear: vi.fn() };
-    const configs = { mangalib: mangalibConfig, ranobelib: ranobelibConfig };
-    global.serviceRegistry = { getService: vi.fn(key => (configs[key] ? { config: configs[key] } : null)) };
-    ({ HistoryController } = await import('../../ui/HistoryController.js'));
+    global.popupController = null;
+    delete global.getExtensionApi;
+    await import('../../ui/HistoryController.js');
 });
 
 describe('HistoryController', () => {
     describe('_render — empty history', () => {
         it('hides list, shows empty message, hides clearBtn', () => {
-            HistoryController.init();
+            global.HistoryController.init();
             expect(document.getElementById('historyList').style.display).toBe('none');
             expect(document.getElementById('historyEmpty').style.display).toBe('block');
             expect(document.getElementById('clearHistoryBtn').style.display).toBe('none');
@@ -39,7 +32,7 @@ describe('HistoryController', () => {
 
         it('handles missing DOM elements without throwing', () => {
             document.body.innerHTML = '<div></div>';
-            expect(() => HistoryController.init()).not.toThrow();
+            expect(() => global.HistoryController.init()).not.toThrow();
         });
     });
 
@@ -49,7 +42,7 @@ describe('HistoryController', () => {
                 title: 'My Novel', slug: 'novel', service: 'ranobelib',
                 format: 'epub', downloadedAt: Date.now()
             }]);
-            HistoryController.init();
+            global.HistoryController.init();
             expect(document.getElementById('historyList').style.display).toBe('flex');
             expect(document.getElementById('historyEmpty').style.display).toBe('none');
             expect(document.getElementById('clearHistoryBtn').style.display).toBe('block');
@@ -63,21 +56,9 @@ describe('HistoryController', () => {
                 title: 'X', slug: 's', service: 'unknown',
                 format: 'pdf', downloadedAt: Date.now()
             }]);
-            HistoryController.init();
+            global.HistoryController.init();
             const card = document.querySelector('.history-card');
             expect(card.style.borderLeftColor).toBe('rgb(255, 145, 0)');
-        });
-
-        it('uses the primary color of a registered service', () => {
-            global.serviceRegistry.getService = vi.fn(key =>
-                key === 'mangalib' ? { config: { primaryColor: '#0000ff' } } : null);
-            global.DownloadHistory.getAll = vi.fn(() => [{
-                title: 'X', slug: 's', service: 'mangalib',
-                format: 'pdf', downloadedAt: Date.now()
-            }]);
-            HistoryController.init();
-            const card = document.querySelector('.history-card');
-            expect(card.style.borderLeftColor).toBe('rgb(0, 0, 255)');
         });
 
         it('uppercases unknown format', () => {
@@ -85,7 +66,7 @@ describe('HistoryController', () => {
                 title: 'X', slug: 's', service: 'ranobelib',
                 format: 'xyz', downloadedAt: Date.now()
             }]);
-            HistoryController.init();
+            global.HistoryController.init();
             expect(document.getElementById('historyList').innerHTML).toContain('XYZ');
         });
 
@@ -93,7 +74,7 @@ describe('HistoryController', () => {
             global.DownloadHistory.getAll = vi.fn(() => [{
                 slug: 'my-slug', service: 'ranobelib', format: 'fb2', downloadedAt: Date.now()
             }]);
-            HistoryController.init();
+            global.HistoryController.init();
             expect(document.querySelector('.history-card-title').textContent).toBe('my-slug');
         });
 
@@ -102,9 +83,9 @@ describe('HistoryController', () => {
                 title: 'Test', slug: 'test-slug', service: 'ranobelib',
                 format: 'epub', downloadedAt: Date.now()
             }]);
-            HistoryController.init();
+            global.HistoryController.init();
             document.querySelector('.history-card-title').click();
-            expect(global.extensionApi.tabs.create).toHaveBeenCalledWith({ url: 'https://ranobelib.me/ru/book/test-slug' });
+            expect(global.browser.tabs.create).toHaveBeenCalledWith({ url: 'https://ranobelib.me/ru/book/test-slug' });
         });
 
         it('opens mangalib URL for mangalib service', () => {
@@ -112,47 +93,23 @@ describe('HistoryController', () => {
                 title: 'Manga', slug: 'manga-slug', service: 'mangalib',
                 format: 'fb2', downloadedAt: Date.now()
             }]);
-            HistoryController.init();
+            global.HistoryController.init();
             document.querySelector('.history-card-title').click();
-            expect(global.extensionApi.tabs.create).toHaveBeenCalledWith({ url: 'https://mangalib.me/ru/manga/manga-slug' });
+            expect(global.browser.tabs.create).toHaveBeenCalledWith({ url: 'https://mangalib.me/ru/manga/manga-slug' });
         });
 
-        it('encodes the slug in the title URL', () => {
-            global.DownloadHistory.getAll = vi.fn(() => [{
-                title: 'Manga', slug: 'a b/c', service: 'mangalib',
-                format: 'fb2', downloadedAt: Date.now()
-            }]);
-            HistoryController.init();
-            document.querySelector('.history-card-title').click();
-            expect(global.extensionApi.tabs.create).toHaveBeenCalledWith({ url: 'https://mangalib.me/ru/manga/a%20b%2Fc' });
-        });
-
-        it('does not link the title of a service without titleUrl', () => {
-            global.serviceRegistry.getService = vi.fn(() => ({ config: { name: 'plugin' } }));
-            global.DownloadHistory.getAll = vi.fn(() => [{
-                title: 'T', slug: 's', service: 'plugin', format: 'fb2', downloadedAt: Date.now()
-            }]);
-            HistoryController.init();
-            const titleEl = document.querySelector('.history-card-title');
-            expect(titleEl.classList.contains('history-card-title--link')).toBe(false);
-        });
-
-        it('does not add click handler when the extension api has no tabs', () => {
-            global.extensionApi = {};
-            global.DownloadHistory.getAll = vi.fn(() => [{
+        it('does not add click handler when browserAPI has no tabs', async () => {
+            vi.resetModules();
+            setupDOM();
+            global.browser = {};
+            global.chrome = undefined;
+            global.DownloadHistory = { getAll: vi.fn(() => [{
                 title: 'T', slug: 's', service: 'ranobelib', format: 'epub', downloadedAt: Date.now()
-            }]);
-            HistoryController.init();
-            const titleEl = document.querySelector('.history-card-title');
-            expect(titleEl.classList.contains('history-card-title--link')).toBe(false);
-        });
-
-        it('does not add click handler when the extension api is unavailable', () => {
-            global.extensionApi = null;
-            global.DownloadHistory.getAll = vi.fn(() => [{
-                title: 'T', slug: 's', service: 'ranobelib', format: 'epub', downloadedAt: Date.now()
-            }]);
-            expect(() => HistoryController.init()).not.toThrow();
+            }]), clear: vi.fn() };
+            global.popupController = null;
+            delete global.getExtensionApi;
+            await import('../../ui/HistoryController.js');
+            global.HistoryController.init();
             const titleEl = document.querySelector('.history-card-title');
             expect(titleEl.classList.contains('history-card-title--link')).toBe(false);
         });
@@ -162,7 +119,7 @@ describe('HistoryController', () => {
                 title: 'T', slug: 's', service: 'ranobelib', format: 'fb2',
                 downloadedAt: Date.now(), chapterFrom: 'Ch 1', chapterTo: 'Ch 5'
             }]);
-            HistoryController.init();
+            global.HistoryController.init();
             expect(document.getElementById('historyList').innerHTML).toContain('Ch 1 — Ch 5');
         });
 
@@ -171,7 +128,7 @@ describe('HistoryController', () => {
                 title: 'T', slug: 's', service: 'ranobelib', format: 'fb2',
                 downloadedAt: Date.now(), chapterFrom: 'Ch 3', chapterTo: 'Ch 3'
             }]);
-            HistoryController.init();
+            global.HistoryController.init();
             const html = document.getElementById('historyList').innerHTML;
             expect(html).toContain('Ch 3');
             expect(html).not.toContain('Ch 3 — Ch 3');
@@ -182,17 +139,8 @@ describe('HistoryController', () => {
                 title: 'T', slug: 's', service: 'ranobelib', format: 'fb2',
                 downloadedAt: Date.now(), chapterFrom: null, chapterTo: 'Ch 5'
             }]);
-            HistoryController.init();
+            global.HistoryController.init();
             expect(document.getElementById('historyList').innerHTML).toContain('— — Ch 5');
-        });
-
-        it('uses chapterTo fallback dash when chapterFrom is set but chapterTo is null', () => {
-            global.DownloadHistory.getAll = vi.fn(() => [{
-                title: 'T', slug: 's', service: 'ranobelib', format: 'fb2',
-                downloadedAt: Date.now(), chapterFrom: 'Ch 1', chapterTo: null
-            }]);
-            HistoryController.init();
-            expect(document.getElementById('historyList').innerHTML).toContain('Ch 1 — —');
         });
 
         it('shows translator row when translator is set', () => {
@@ -200,44 +148,42 @@ describe('HistoryController', () => {
                 title: 'T', slug: 's', service: 'ranobelib', format: 'fb2',
                 downloadedAt: Date.now(), translator: 'Team Alpha'
             }]);
-            HistoryController.init();
+            global.HistoryController.init();
             expect(document.getElementById('historyList').innerHTML).toContain('Перевод: Team Alpha');
         });
     });
 
     describe('_bindEvents', () => {
-        it('backBtn clears logoInfo and calls onBack', () => {
-            const onBack = vi.fn();
-            document.getElementById('logoInfo').textContent = 'info';
-            HistoryController.init(onBack);
+        it('backBtn clears logoInfo and calls popupController._restoreMainView', () => {
+            global.popupController = { _restoreMainView: vi.fn() };
+            global.HistoryController.init();
             document.getElementById('backBtn').click();
             expect(document.getElementById('logoInfo').textContent).toBe('');
-            expect(onBack).toHaveBeenCalled();
+            expect(global.popupController._restoreMainView).toHaveBeenCalled();
         });
 
-        it('backBtn logs error when onBack is not provided', () => {
+        it('backBtn logs error when popupController is not set', () => {
             const errorSpy = vi.spyOn(console, 'error');
-            HistoryController.init();
+            global.HistoryController.init();
             document.getElementById('backBtn').click();
-            expect(errorSpy).toHaveBeenCalledWith('[HistoryController] onBack callback not provided');
+            expect(errorSpy).toHaveBeenCalledWith('[HistoryController] popupController not found');
             errorSpy.mockRestore();
         });
 
         it('backBtn skips logoInfo clear when logoInfo is null', () => {
-            const onBack = vi.fn();
+            global.popupController = { _restoreMainView: vi.fn() };
             document.getElementById('logoInfo').remove();
             expect(() => {
-                HistoryController.init(onBack);
+                global.HistoryController.init();
                 document.getElementById('backBtn').click();
             }).not.toThrow();
-            expect(onBack).toHaveBeenCalled();
         });
 
         it('clearBtn calls DownloadHistory.clear and re-renders', () => {
             global.DownloadHistory.getAll = vi.fn()
                 .mockReturnValueOnce([{ title: 'T', slug: 's', service: 'ranobelib', format: 'fb2', downloadedAt: Date.now() }])
                 .mockReturnValue([]);
-            HistoryController.init();
+            global.HistoryController.init();
             document.getElementById('clearHistoryBtn').click();
             expect(global.DownloadHistory.clear).toHaveBeenCalled();
             expect(document.getElementById('historyEmpty').style.display).toBe('block');
@@ -245,15 +191,85 @@ describe('HistoryController', () => {
 
         it('handles missing backBtn and clearBtn gracefully', () => {
             document.body.innerHTML = '<div id="historyList"></div><div id="historyEmpty"></div>';
-            expect(() => HistoryController.init()).not.toThrow();
+            expect(() => global.HistoryController.init()).not.toThrow();
         });
     });
 
-    it('handles null list/empty/clearBtn in non-empty render branch', () => {
+    it('uses getExtensionApi when available', async () => {
+        vi.resetModules();
+        setupDOM();
+        const fakeApi = { tabs: { create: vi.fn() } };
+        global.getExtensionApi = vi.fn(() => fakeApi);
+        global.browser = undefined;
+        global.chrome = undefined;
+        global.DownloadHistory = { getAll: vi.fn(() => [{
+            title: 'T', slug: 's', service: 'ranobelib', format: 'epub', downloadedAt: Date.now()
+        }]), clear: vi.fn() };
+        global.popupController = null;
+        await import('../../ui/HistoryController.js');
+        global.HistoryController.init();
+        expect(global.getExtensionApi).toHaveBeenCalled();
+        document.querySelector('.history-card-title').click();
+        expect(fakeApi.tabs.create).toHaveBeenCalled();
+        delete global.getExtensionApi;
+    });
+
+    it('uses chrome API when browser is not defined', async () => {
+        vi.resetModules();
+        setupDOM();
+        global.browser = undefined;
+        global.chrome = { tabs: { create: vi.fn() } };
+        global.DownloadHistory = { getAll: vi.fn(() => [{
+            title: 'T', slug: 's', service: 'mangalib', format: 'fb2', downloadedAt: Date.now()
+        }]), clear: vi.fn() };
+        global.popupController = null;
+        delete global.getExtensionApi;
+        await import('../../ui/HistoryController.js');
+        global.HistoryController.init();
+        document.querySelector('.history-card-title').click();
+        expect(global.chrome.tabs.create).toHaveBeenCalled();
+    });
+
+    it('uses null browserAPI when no browser, chrome, or getExtensionApi', async () => {
+        vi.resetModules();
+        setupDOM();
+        global.browser = undefined;
+        global.chrome = undefined;
+        delete global.getExtensionApi;
+        global.DownloadHistory = { getAll: vi.fn(() => []), clear: vi.fn() };
+        global.popupController = null;
+        await import('../../ui/HistoryController.js');
+        expect(() => global.HistoryController.init()).not.toThrow();
+    });
+
+    it('handles null list/empty/clearBtn in non-empty render branch', async () => {
         document.body.innerHTML = '<button id="backBtn"></button>';
         global.DownloadHistory.getAll = vi.fn(() => [{
             title: 'T', slug: 's', service: 'ranobelib', format: 'epub', downloadedAt: Date.now()
         }]);
-        expect(() => HistoryController.init()).not.toThrow();
+        expect(() => global.HistoryController.init()).not.toThrow();
+    });
+
+    it('uses chapterTo fallback dash when chapterFrom is set but chapterTo is null', () => {
+        global.DownloadHistory.getAll = vi.fn(() => [{
+            title: 'T', slug: 's', service: 'ranobelib', format: 'fb2',
+            downloadedAt: Date.now(), chapterFrom: 'Ch 1', chapterTo: null
+        }]);
+        global.HistoryController.init();
+        expect(document.getElementById('historyList').innerHTML).toContain('Ch 1 — —');
+    });
+
+    it('attaches to self when window is undefined', async () => {
+        vi.resetModules();
+        setupDOM();
+        const originalWindow = global.window;
+        delete global.window;
+        global.self = global;
+        global.browser = { tabs: { create: vi.fn() } };
+        global.DownloadHistory = { getAll: vi.fn(() => []), clear: vi.fn() };
+        global.popupController = null;
+        await import('../../ui/HistoryController.js');
+        expect(global.self.HistoryController).toBeDefined();
+        global.window = originalWindow;
     });
 });

@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 let ServiceRegistry;
-let serviceRegistry;
 
 beforeEach(async () => {
-    vi.resetModules();
-    ({ ServiceRegistry, serviceRegistry } = await import('../../services/ServiceRegistry.js'));
+    const path = require.resolve('../../services/ServiceRegistry.js');
+    delete require.cache[path];
+    await import('../../services/ServiceRegistry.js');
+    ServiceRegistry = global.ServiceRegistry;
 });
 
 describe('ServiceRegistry', () => {
@@ -59,17 +60,6 @@ describe('ServiceRegistry', () => {
         expect(registry.getServiceByUrl('http://none.com')).toBeNull();
     });
 
-    it('Calls matches with the service class as this', () => {
-        class ConfigService {
-            static config = { hosts: ['config.example'] };
-            constructor() { this.name = 'Config'; }
-            static matches(url) { return url.includes(this.config.hosts[0]); }
-        }
-        const registry = new ServiceRegistry();
-        registry.register(ConfigService);
-        expect(registry.getServiceByUrl('https://config.example/manga/x')).toBeInstanceOf(ConfigService);
-    });
-
     it('Handles matcher errors in getServiceByUrl', () => {
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
         class BadMatcherService {
@@ -100,8 +90,8 @@ describe('ServiceRegistry', () => {
         expect(all.some(s => s instanceof S2)).toBe(true);
     });
 
-    it('Shared serviceRegistry instance is exported', () => {
-        expect(serviceRegistry).toBeInstanceOf(ServiceRegistry);
+    it('Global serviceRegistry is defined', () => {
+        expect(global.serviceRegistry).toBeInstanceOf(ServiceRegistry);
     });
 
     it('createService returns new instance by name', () => {
@@ -147,5 +137,28 @@ describe('ServiceRegistry', () => {
         expect(registry.createService('Bad')).toBeNull();
         expect(errorSpy).toHaveBeenCalled();
         errorSpy.mockRestore();
+    });
+
+    it('Сalls importScripts in service worker context', async () => {
+        vi.resetModules();
+        const importScriptsMock = vi.fn();
+        global.importScripts = importScriptsMock;
+        await import('../../services/ServiceRegistry.js');
+        expect(importScriptsMock).toHaveBeenCalled();
+        delete global.importScripts;
+    });
+
+    it('Сalls document.write in browser page context', async () => {
+        vi.resetModules();
+        delete global.importScripts;
+        const writeMock = vi.spyOn(document, 'write').mockImplementation(() => {});
+        Object.defineProperty(document, 'currentScript', {
+            get: () => document.createElement('script'),
+            configurable: true
+        });
+        await import('../../services/ServiceRegistry.js');
+        expect(writeMock).toHaveBeenCalled();
+        writeMock.mockRestore();
+        delete document.currentScript;
     });
 });

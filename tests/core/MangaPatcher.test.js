@@ -1,10 +1,12 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 
 let MangaPatcher;
 
 beforeEach(async () => {
-    vi.resetModules();
-    ({ MangaPatcher } = await import('../../core/MangaPatcher.js'));
+    const path = require.resolve('../../core/MangaPatcher.js');
+    delete require.cache[path];
+    await import('../../core/MangaPatcher.js');
+    MangaPatcher = global.MangaPatcher;
 });
 
 describe('MangaPatcher', () => {

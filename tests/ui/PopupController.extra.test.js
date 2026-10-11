@@ -1,20 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-vi.mock('../../core/AuthManager.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('AuthManager'));
-vi.mock('../../core/BrowserApi.js', async () => (await import('../helpers/globalBridge.js'))
-    .globalBridge('extensionApi', 'browserEnv', 'fetchViaTab', 'setServiceTab'));
-vi.mock('../../core/DownloadHistory.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('DownloadHistory'));
-vi.mock('../../core/DownloadManager.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('DownloadManager'));
-vi.mock('../../core/PluginManager.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('PluginManager'));
-vi.mock('../../exporters/ExporterRegistry.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('ExporterRegistry'));
-vi.mock('../../services/mangalib/MangaLibService.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('MangaLibService'));
-vi.mock('../../services/ranobelib/RanobeLibService.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('RanobeLibService'));
-vi.mock('../../services/ServiceRegistry.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('serviceRegistry'));
-vi.mock('../../ui/ChapterController.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('ChapterController'));
-vi.mock('../../ui/HistoryController.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('HistoryController'));
-vi.mock('../../ui/SettingsController.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('SettingsController'));
-vi.mock('../../ui/TemplateLoader.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('TemplateLoader'));
-
 let PopupController;
 let intervals = [];
 let originalSetInterval;
@@ -46,6 +31,10 @@ function setupDOM() {
             <div id="formatContainer">
                 <select id="formatSelector"></select>
             </div>
+            <div id="fileInputContainer">
+                <input type="file" id="fileInput">
+                <button id="customFileBtn">Загрузить файл для обновления</button>
+            </div>
             <div id="downloadInfoPanel" style="display:none;"></div>
             <button id="downloadBtn"></button>
             <div id="status"></div>
@@ -60,6 +49,7 @@ function setupDOM() {
 
 beforeEach(async () => {
     vi.resetModules();
+    delete global.getExtensionApi;
 
     intervals = [];
     if (!originalSetInterval) originalSetInterval = global.setInterval;
@@ -83,7 +73,7 @@ beforeEach(async () => {
     };
     global.DownloadManager = class {
         constructor() { this.eventBus = { on: vi.fn() }; }
-        startDownload = vi.fn(async () => ({ success: true, downloadId: 'id' }));
+        startDownload = vi.fn(async () => ({ updated: true, addedChapters: 1 }));
         stop = vi.fn();
         getDownloadState = vi.fn(() => null);
     };
@@ -110,7 +100,7 @@ beforeEach(async () => {
         fetchMangaMetadata = vi.fn(async () => ({ data: { rus_name: 'Title', summary: 'S', cover: null, authors: [], ageRestriction: null } }));
         fetchChaptersList = vi.fn(async () => ({ data: [] }));
     };
-    global.extensionApi = {
+    global.browser = {
         runtime: {
             sendMessage: vi.fn(async () => ({ ok: true, downloads: [] })),
             getURL: vi.fn(() => 'popup.html')
@@ -152,11 +142,10 @@ beforeEach(async () => {
     global.fetch = vi.fn(async () => ({
         json: async () => ({ workflow_runs: [{ conclusion: 'success' }] })
     }));
-    global.browserEnv = { isFirefox: true };
-    global.PluginManager = { loadAll: vi.fn(async () => {}) };
-    global.SettingsController = { init: vi.fn() };
 
-    ({ PopupController } = await import('../../ui/PopupController.js'));
+    await import('../../core/MangaPatcher.js');
+    await import('../../ui/PopupController.js');
+    PopupController = global.PopupController;
 });
 
 afterEach(() => {
@@ -226,21 +215,54 @@ describe('PopupController extra coverage', () => {
 
     describe('_bindTitleEvents', () => {
         it('browserAPI.storage.local.set called on init when storage is available', () => {
-            global.extensionApi.storage = { local: { set: vi.fn() } };
+            global.browser.storage = { local: { set: vi.fn() } };
             const controller = new PopupController();
             controller._bindTitleEvents();
-            expect(global.extensionApi.storage.local.set).toHaveBeenCalled();
+            expect(global.browser.storage.local.set).toHaveBeenCalled();
         });
 
         it('browserAPI.storage.local.set called on format change', () => {
-            global.extensionApi.storage = { local: { set: vi.fn() } };
+            global.browser.storage = { local: { set: vi.fn() } };
             const controller = new PopupController();
             controller._bindTitleEvents();
             const formatSelector = document.getElementById('formatSelector');
             formatSelector.dispatchEvent(new Event('change'));
-            expect(global.extensionApi.storage.local.set.mock.calls.length).toBeGreaterThan(1);
+            expect(global.browser.storage.local.set.mock.calls.length).toBeGreaterThan(1);
         });
 
+
+        it('hiddenFileInput change: no file resets btn text', () => {
+            const controller = new PopupController();
+            controller._bindTitleEvents();
+            const fileInput = document.getElementById('fileInput');
+            Object.defineProperty(fileInput, 'files', { value: [], configurable: true });
+            fileInput.dispatchEvent(new Event('change'));
+            expect(document.getElementById('downloadBtn').textContent).toBe('Скачать');
+        });
+
+        it('hiddenFileInput change: valid extension sets loadedFile and updates UI', () => {
+            const controller = new PopupController();
+            controller._bindTitleEvents();
+            const fileInput = document.getElementById('fileInput');
+            Object.defineProperty(fileInput, 'files', {
+                value: [{ name: 'book.epub' }], configurable: true
+            });
+            fileInput.dispatchEvent(new Event('change'));
+            expect(controller.loadedFile).toEqual({ name: 'book.epub' });
+            expect(document.getElementById('downloadBtn').textContent).toBe('Обновить файл');
+        });
+
+        it('hiddenFileInput change: invalid extension shows error and clears loadedFile', () => {
+            const controller = new PopupController();
+            controller._bindTitleEvents();
+            const fileInput = document.getElementById('fileInput');
+            Object.defineProperty(fileInput, 'files', {
+                value: [{ name: 'data.docx' }], configurable: true
+            });
+            fileInput.dispatchEvent(new Event('change'));
+            expect(controller.loadedFile).toBeNull();
+            expect(document.getElementById('status').textContent).toContain('Ошибка');
+        });
 
         it('chapterFromSelect: logs when no invalid range (from <= to)', () => {
             const controller = new PopupController();
@@ -259,6 +281,33 @@ describe('PopupController extra coverage', () => {
             const logSpy = vi.spyOn(console, 'log');
             fromSel.dispatchEvent(new Event('change'));
             expect(logSpy).toHaveBeenCalledWith('[PopupController] Chapter range selectors updated without invalid range');
+        });
+
+        it('hiddenFileInput change: no file with status null does not throw', () => {
+            document.getElementById('status').remove();
+            const controller = new PopupController();
+            controller._bindTitleEvents();
+            const fileInput = document.getElementById('fileInput');
+            Object.defineProperty(fileInput, 'files', { value: [], configurable: true });
+            expect(() => fileInput.dispatchEvent(new Event('change'))).not.toThrow();
+        });
+
+        it('hiddenFileInput change: valid ext with status null does not throw', () => {
+            document.getElementById('status').remove();
+            const controller = new PopupController();
+            controller._bindTitleEvents();
+            const fileInput = document.getElementById('fileInput');
+            Object.defineProperty(fileInput, 'files', { value: [{ name: 'x.fb2' }], configurable: true });
+            expect(() => fileInput.dispatchEvent(new Event('change'))).not.toThrow();
+        });
+
+        it('hiddenFileInput change: invalid ext with status null does not throw', () => {
+            document.getElementById('status').remove();
+            const controller = new PopupController();
+            controller._bindTitleEvents();
+            const fileInput = document.getElementById('fileInput');
+            Object.defineProperty(fileInput, 'files', { value: [{ name: 'x.doc' }], configurable: true });
+            expect(() => fileInput.dispatchEvent(new Event('change'))).not.toThrow();
         });
 
         it('chapterToSelect: logs when no invalid range (to >= from)', () => {
@@ -321,7 +370,7 @@ describe('PopupController extra coverage', () => {
             await controller._showWrongServiceState();
             document.querySelector('.mangalib-link-btn').click();
             await new Promise(r => setTimeout(r, 10));
-            expect(global.extensionApi.tabs.create).toHaveBeenCalledWith({ url: 'https://mangalib.me' });
+            expect(global.browser.tabs.create).toHaveBeenCalledWith({ url: 'https://mangalib.me' });
         });
 
         it('binds ranobelib service button click', async () => {
@@ -330,14 +379,14 @@ describe('PopupController extra coverage', () => {
             await controller._showWrongServiceState();
             document.querySelector('.ranobelib-link-btn').click();
             await new Promise(r => setTimeout(r, 10));
-            expect(global.extensionApi.tabs.create).toHaveBeenCalledWith({ url: 'https://ranobelib.me' });
+            expect(global.browser.tabs.create).toHaveBeenCalledWith({ url: 'https://ranobelib.me' });
         });
 
         it('binds openGithub click in wrong-service', async () => {
             const controller = new PopupController();
             await controller._showWrongServiceState();
             document.getElementById('openGithub').click();
-            expect(global.extensionApi.tabs.create).toHaveBeenCalledWith({ url: 'https://github.com/ivanvit100/DownloadLib' });
+            expect(global.browser.tabs.create).toHaveBeenCalledWith({ url: 'https://github.com/ivanvit100/DownloadLib' });
         });
 
         it('skips logoInfo clear when logoInfo is null in wrong-service', async () => {
@@ -357,7 +406,7 @@ describe('PopupController extra coverage', () => {
             const controller = new PopupController();
             await controller._showNoTitleState();
             document.getElementById('openGithub').click();
-            expect(global.extensionApi.tabs.create).toHaveBeenCalledWith({ url: 'https://github.com/ivanvit100/DownloadLib' });
+            expect(global.browser.tabs.create).toHaveBeenCalledWith({ url: 'https://github.com/ivanvit100/DownloadLib' });
         });
 
         it('skips logoInfo clear when logoInfo is null in no-title state', async () => {
@@ -389,6 +438,7 @@ describe('PopupController extra coverage', () => {
             const controller = new PopupController();
             controller.currentSlug = 'my-slug';
             controller.currentServiceKey = 'ranobelib';
+            controller.loadedFile = null;
             controller.isInSeparateWindow = vi.fn(async () => false);
             controller.openInNewContext = vi.fn(async () => {});
 
@@ -416,6 +466,7 @@ describe('PopupController extra coverage', () => {
             const controller = new PopupController();
             controller.currentSlug = 'my-slug';
             controller.currentServiceKey = 'ranobelib';
+            controller.loadedFile = null;
             controller.isInSeparateWindow = vi.fn(async () => false);
             controller.openInNewContext = vi.fn(async () => { throw new Error('window error'); });
             const startSpy = vi.spyOn(controller, 'startDownload').mockResolvedValue();
@@ -427,11 +478,11 @@ describe('PopupController extra coverage', () => {
             expect(startSpy).toHaveBeenCalled();
         });
 
-        it('download btn calls startDownload directly when already in a separate window', async () => {
+        it('download btn calls startDownload directly when loadedFile is set', async () => {
             const controller = new PopupController();
             controller.currentSlug = 'my-slug';
             controller.currentServiceKey = 'ranobelib';
-            controller.isInSeparateWindow = vi.fn(async () => true);
+            controller.loadedFile = { name: 'book.epub' };
             const startSpy = vi.spyOn(controller, 'startDownload').mockResolvedValue();
 
             controller.setupEventListeners();
@@ -479,6 +530,7 @@ describe('PopupController extra coverage', () => {
         async function clickDownloadBtn(controller, elementsToRemove = []) {
             controller.currentSlug = 'slug';
             controller.currentServiceKey = 'ranobelib';
+            controller.loadedFile = null;
             controller.isInSeparateWindow = vi.fn(async () => false);
             const openSpy = vi.fn(async () => {});
             controller.openInNewContext = openSpy;
@@ -565,6 +617,68 @@ describe('PopupController extra coverage', () => {
         });
     });
 
+    describe('customFileBtn.onclick branches', () => {
+        async function setupCustomFileBtn(controller) {
+            controller.isInSeparateWindow = vi.fn(async () => false);
+            controller.openInNewContext = vi.fn(async () => {});
+            await controller.loadMetadata();
+        }
+
+        it('else branch (not separate window): calls openInNewContext', async () => {
+            const controller = new PopupController();
+            await setupCustomFileBtn(controller);
+            document.getElementById('customFileBtn').click();
+            await new Promise(r => setTimeout(r, 50));
+            expect(controller.openInNewContext).toHaveBeenCalled();
+        });
+
+        it('inner catch: calls hiddenFileInput.click when openInNewContext throws', async () => {
+            const controller = new PopupController();
+            controller.isInSeparateWindow = vi.fn(async () => false);
+            controller.openInNewContext = vi.fn(async () => { throw new Error('ctx error'); });
+            await controller.loadMetadata();
+            const clickSpy = vi.spyOn(document.getElementById('fileInput'), 'click');
+            document.getElementById('customFileBtn').click();
+            await new Promise(r => setTimeout(r, 50));
+            expect(clickSpy).toHaveBeenCalled();
+        });
+
+        it('outer catch: handles exception from isInSeparateWindow', async () => {
+            const controller = new PopupController();
+            controller.isInSeparateWindow = vi.fn(async () => { throw new Error('detect fail'); });
+            await controller.loadMetadata();
+            const clickSpy = vi.spyOn(document.getElementById('fileInput'), 'click');
+            document.getElementById('customFileBtn').click();
+            await new Promise(r => setTimeout(r, 50));
+            expect(clickSpy).toHaveBeenCalled();
+        });
+
+        it('inSeparateWindow path: skips status update when status is null', async () => {
+            document.getElementById('status').remove();
+            const controller = new PopupController();
+            controller.isInSeparateWindow = vi.fn(async () => true);
+            await controller.loadMetadata();
+            await expect(document.getElementById('customFileBtn').onclick()).resolves.not.toThrow();
+        });
+
+        it('inner catch path: skips status update when status is null', async () => {
+            document.getElementById('status').remove();
+            const controller = new PopupController();
+            controller.isInSeparateWindow = vi.fn(async () => false);
+            controller.openInNewContext = vi.fn(async () => { throw new Error('fail'); });
+            await controller.loadMetadata();
+            await expect(document.getElementById('customFileBtn').onclick()).resolves.not.toThrow();
+        });
+
+        it('outer catch path: skips status update when status is null', async () => {
+            document.getElementById('status').remove();
+            const controller = new PopupController();
+            controller.isInSeparateWindow = vi.fn(() => { throw new Error('fail'); });
+            await controller.loadMetadata();
+            await expect(document.getElementById('customFileBtn').onclick()).resolves.not.toThrow();
+        });
+    });
+
     describe('_fetchCover', () => {
         it('returns base64 data URL when fetchViaTab returns ok response', async () => {
             global.fetchViaTab = vi.fn(async () => ({
@@ -609,6 +723,28 @@ describe('PopupController extra coverage', () => {
         });
     });
 
+    it('attaches to self when window is undefined during IIFE', async () => {
+        vi.resetModules();
+        setupDOM();
+        const originalWindow = global.window;
+        delete global.window;
+        global.self = global;
+        global.browser = { runtime: { sendMessage: vi.fn(), getURL: vi.fn(() => '') }, tabs: { query: vi.fn(async () => []) }, windows: { getCurrent: vi.fn(async () => ({ type: 'normal' })) } };
+        global.DownloadManager = class { constructor() { this.eventBus = { on: vi.fn() }; } startDownload = vi.fn(); stop = vi.fn(); getDownloadState = vi.fn(() => null); };
+        global.ExporterRegistry = { getFormats: vi.fn(() => []) };
+        global.TemplateLoader = { show: vi.fn(async () => {}), current: vi.fn(() => null) };
+        global.HistoryController = { init: vi.fn() };
+        global.AuthManager = { apply: vi.fn(async () => null) };
+        global.ChapterController = class { constructor() {} loadAndPopulate = vi.fn(async () => 0); };
+        global.DownloadHistory = { add: vi.fn() };
+        global.setServiceTab = vi.fn();
+        global.fetchViaTab = vi.fn(async () => null);
+        await import('../../core/MangaPatcher.js');
+        await import('../../ui/PopupController.js');
+        expect(global.self.PopupController).toBeDefined();
+        global.window = originalWindow;
+    });
+
     describe('_showApiWarning', () => {
         it('inserts warning div before downloadBtn', () => {
             const controller = new PopupController();
@@ -622,7 +758,7 @@ describe('PopupController extra coverage', () => {
             controller._showApiWarning('https://example.com/issues');
             const link = document.getElementById('apiWarningLink');
             link.click();
-            expect(global.extensionApi.tabs.create).toHaveBeenCalledWith({ url: 'https://example.com/issues' });
+            expect(global.browser.tabs.create).toHaveBeenCalledWith({ url: 'https://example.com/issues' });
         });
 
         it('does not throw when downloadBtn is missing', () => {

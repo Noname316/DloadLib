@@ -1,33 +1,42 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('../../background/tokenStore.js', async () => (await import('../helpers/globalBridge.js'))
-    .globalBridge({ getToken: 'tsGetToken', setToken: 'tsSetToken', invalidate: 'tsInvalidate' }));
-vi.mock('../../background/rateLimitService.js', async () => (await import('../helpers/globalBridge.js'))
-    .globalBridge({ acquire: 'rlAcquire', throttle: 'rlThrottle', getStats: 'rlGetStats' }));
-
-const EXT_ID = 'test-ext-id';
-const PAGE = { id: EXT_ID, url: 'moz-extension://test-id/popup.html' };
-
-/**
- * Отправитель — вкладка сайта с content script'ом расширения.
- * @param {string} url - URL вкладки.
- * @param {number} [id] - id вкладки.
- * @returns {object} Отправитель.
- */
-const tabSender = (url, id) => ({ id: EXT_ID, url, tab: { url, id } });
-
+let mockTrackRequest;
+let mockSetLimit;
+let mockGetStats;
+let mockThrottle;
 let mockAddListenerOnMessage;
 let capturedMessageCb;
 let mockAddListenerOnConnect;
 let capturedConnectCb;
+let isFirefoxMode;
 
 function setupGlobals(mode) {
-    globalThis.tsGetToken = vi.fn().mockResolvedValue(null);
-    globalThis.tsSetToken = vi.fn().mockResolvedValue(true);
-    globalThis.tsInvalidate = vi.fn().mockResolvedValue();
-    globalThis.rlAcquire = vi.fn().mockResolvedValue();
-    globalThis.rlThrottle = vi.fn(async ms => ({ blockedUntil: 1000 + ms }));
-    globalThis.rlGetStats = vi.fn().mockResolvedValue({});
+    delete globalThis.getExtensionApi;
+
+    isFirefoxMode = mode === 'firefox';
+
+    mockTrackRequest = vi.fn().mockResolvedValue();
+    mockSetLimit = vi.fn();
+    mockGetStats = vi.fn().mockReturnValue({ rpm: 10 });
+    mockThrottle = vi.fn();
+
+    globalThis.globalRateLimiter = {
+        trackRequest: mockTrackRequest,
+        setLimit: mockSetLimit,
+        getStats: mockGetStats,
+        throttle: mockThrottle,
+    };
+    globalThis.RateLimiter = vi.fn(() => globalThis.globalRateLimiter);
+
+    globalThis.authTokenStore = {};
+
+    globalThis.detectServiceByUrl = (url) => {
+        if (url.includes('ranobelib.me')) return 'ranobelib';
+        if (url.includes('mangalib.me') || url.includes('mangalib.org')) return 'mangalib';
+        if (url.includes('mixlib.me') || url.includes('imglib.info') || url.includes('imgslib.link')) return 'mangalib';
+        if (url.includes('cdnlibs.org')) return 'mangalib';
+        return null;
+    };
 
     capturedMessageCb = null;
     mockAddListenerOnMessage = vi.fn((cb) => { capturedMessageCb = cb; });
@@ -36,11 +45,15 @@ function setupGlobals(mode) {
     mockAddListenerOnConnect = vi.fn((cb) => { capturedConnectCb = cb; });
 
     const apiObj = {
+        webRequest: {
+            onBeforeSendHeaders: { addListener: vi.fn() },
+            onBeforeRequest: { addListener: vi.fn() },
+        },
         runtime: {
             onMessage: { addListener: mockAddListenerOnMessage },
             onConnect: { addListener: mockAddListenerOnConnect },
             getURL: vi.fn(p => `moz-extension://test-id/${p}`),
-            id: EXT_ID,
+            id: 'test-ext-id',
         },
     };
 
@@ -55,50 +68,23 @@ function setupGlobals(mode) {
         delete globalThis.browser;
     }
 
+    globalThis.fetch = vi.fn();
+
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 }
 
 async function loadModule() {
     vi.resetModules();
+    globalThis.authTokenStore = {};
     await import('../../background/MessageRouter.js');
-}
-
-async function loadWithPlugins(plugins) {
-    setupGlobals('firefox');
-    const storageGet = vi.fn().mockResolvedValue({ custom_plugins: plugins });
-    globalThis.browser.storage = { local: { get: storageGet } };
-    await loadModule();
-    await vi.waitFor(() => expect(storageGet).toHaveBeenCalled());
-    await new Promise(resolve => setTimeout(resolve, 0));
-}
-
-/**
- * Передаёт сообщение роутеру и дожидается ответа, если роутер обещал ответить.
- * @param {object} message - Сообщение.
- * @param {object} [sender=PAGE] - Отправитель.
- * @returns {Promise<{returned: boolean, response: *, sendResponse: Function}>}
- */
-async function send(message, sender = PAGE) {
-    const sendResponse = vi.fn();
-    const returned = capturedMessageCb(message, sender, sendResponse);
-    if (returned) await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
-    return { returned, response: sendResponse.mock.calls[0]?.[0], sendResponse };
-}
-
-async function detectedServiceFor(url) {
-    const create = vi.fn().mockResolvedValue({ id: 1 });
-    globalThis.browser.windows = { create, update: vi.fn() };
-    await send({ action: 'openDownloadWindow' }, tabSender(url));
-    const popupUrl = create.mock.calls[0]?.[0]?.url;
-    return popupUrl ? new URLSearchParams(popupUrl.split('?')[1]).get('service') : null;
 }
 
 describe('MessageRouter', () => {
     afterEach(() => {
         vi.restoreAllMocks();
-        for (const name of ['tsGetToken', 'tsSetToken', 'tsInvalidate', 'rlAcquire', 'rlThrottle', 'rlGetStats'])
-            delete globalThis[name];
+        delete globalThis.detectServiceByUrl;
+        delete globalThis.authTokenStore;
     });
 
     describe('Message handler', () => {
@@ -111,274 +97,867 @@ describe('MessageRouter', () => {
             expect(mockAddListenerOnMessage).toHaveBeenCalledWith(expect.any(Function));
         });
 
-        it('Returns false without responding for unknown or missing actions', async () => {
-            for (const message of [{ action: 'unknownAction' }, { action: 'toString' }, {}, null]) {
-                const { returned, sendResponse } = await send(message);
-                expect(returned).toBe(false);
-                expect(sendResponse).not.toHaveBeenCalled();
-            }
+        it('Returns false for unknown message action', () => {
+            const sendResponse = vi.fn();
+            const result = capturedMessageCb({ action: 'unknownAction' }, {}, sendResponse);
+            expect(result).toBe(false);
         });
 
-        it.each(['setRateLimit', 'getRateLimiterStats', 'fetchWithRateLimit', 'fetchImage'])(
-            'Does not handle the removed %s action', async action => {
-                expect((await send({ action, url: 'https://x' })).returned).toBe(false);
+        it('Handles setRateLimit action', () => {
+            const sendResponse = vi.fn();
+            const result = capturedMessageCb({ action: 'setRateLimit', limit: 100 }, {}, sendResponse);
+            expect(mockSetLimit).toHaveBeenCalledWith(100);
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true });
+            expect(result).toBe(true);
+        });
+
+        it('Handles getRateLimiterStats action', () => {
+            const sendResponse = vi.fn();
+            const result = capturedMessageCb({ action: 'getRateLimiterStats' }, {}, sendResponse);
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true, stats: { rpm: 10 } });
+            expect(result).toBe(true);
+        });
+
+        it('Handles getAuthToken returns null when no serviceKey provided', () => {
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'getAuthToken' }, {}, sendResponse);
+            expect(sendResponse).toHaveBeenCalledWith({ token: null });
+        });
+
+        it('Handles getAuthToken returns null for uncached service', () => {
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'getAuthToken', serviceKey: 'mangalib' }, {}, sendResponse);
+            expect(sendResponse).toHaveBeenCalledWith({ token: null });
+        });
+
+        it('Handles cacheAuthToken stores token and getAuthToken retrieves it', () => {
+            const cacheResp = vi.fn();
+            capturedMessageCb({ action: 'cacheAuthToken', serviceKey: 'mangalib', token: 'abc123' }, {}, cacheResp);
+            expect(cacheResp).toHaveBeenCalledWith({ ok: true });
+            const getResp = vi.fn();
+            capturedMessageCb({ action: 'getAuthToken', serviceKey: 'mangalib' }, {}, getResp);
+            expect(getResp).toHaveBeenCalledWith({ token: 'abc123' });
+        });
+
+        it('Handles cacheAuthToken skips storage when serviceKey or token missing', () => {
+            const cacheResp = vi.fn();
+            capturedMessageCb({ action: 'cacheAuthToken', serviceKey: 'mangalib' }, {}, cacheResp);
+            expect(cacheResp).toHaveBeenCalledWith({ ok: true });
+            const getResp = vi.fn();
+            capturedMessageCb({ action: 'getAuthToken', serviceKey: 'mangalib' }, {}, getResp);
+            expect(getResp).toHaveBeenCalledWith({ token: null });
+        });
+
+        it('Handles fetchWithRateLimit success', async () => {
+            globalThis.fetch = vi.fn().mockResolvedValue({
+                ok: true,
+                status: 200,
+                text: vi.fn().mockResolvedValue('{"data":1}'),
+                headers: { get: vi.fn().mockReturnValue('application/json') },
             });
 
-        it('getAuthToken returns the token from the token store', async () => {
-            globalThis.tsGetToken.mockResolvedValue('jwt');
-            const { returned, response } = await send({ action: 'getAuthToken', serviceKey: 'hlib' });
-            expect(returned).toBe(true);
-            expect(response).toEqual({ token: 'jwt' });
-            expect(globalThis.tsGetToken).toHaveBeenCalledWith('hlib');
-        });
-
-        it('getAuthToken returns null without a serviceKey', async () => {
-            expect((await send({ action: 'getAuthToken' })).response).toEqual({ token: null });
-            expect(globalThis.tsGetToken).not.toHaveBeenCalled();
-        });
-
-        it('cacheAuthToken stores the token of the service', async () => {
-            const { response } = await send({ action: 'cacheAuthToken', serviceKey: 'mangalib', token: 'abc' });
-            expect(response).toEqual({ ok: true });
-            expect(globalThis.tsSetToken).toHaveBeenCalledWith('mangalib', 'abc');
-        });
-
-        it('cacheAuthToken skips storage when serviceKey or token is missing', async () => {
-            await send({ action: 'cacheAuthToken', serviceKey: 'mangalib' });
-            await send({ action: 'cacheAuthToken', token: 'abc' });
-            expect(globalThis.tsSetToken).not.toHaveBeenCalled();
-        });
-
-        it('authInvalidate drops the token of the service', async () => {
-            const { response } = await send({ action: 'authInvalidate', serviceKey: 'mangalib' });
-            expect(response).toEqual({ ok: true });
-            expect(globalThis.tsInvalidate).toHaveBeenCalledWith('mangalib');
-        });
-
-        it('rateAcquire answers once the background limiter grants the request', async () => {
-            let grant;
-            globalThis.rlAcquire.mockReturnValue(new Promise(resolve => { grant = resolve; }));
             const sendResponse = vi.fn();
-            expect(capturedMessageCb({ action: 'rateAcquire', serviceKey: 'mangalib' }, PAGE, sendResponse)).toBe(true);
-
-            await new Promise(resolve => setTimeout(resolve, 0));
-            expect(globalThis.rlAcquire).toHaveBeenCalledWith('mangalib');
-            expect(sendResponse).not.toHaveBeenCalled();
-
-            grant();
-            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalledWith({ ok: true }));
-        });
-
-        it('rateThrottle blocks the background limiter and returns the end of the block', async () => {
-            const { response } = await send({ action: 'rateThrottle', ms: 5000 });
-            expect(globalThis.rlThrottle).toHaveBeenCalledWith(5000);
-            expect(response).toEqual({ ok: true, blockedUntil: 6000 });
-        });
-
-        it('Turns a handler error into an error response', async () => {
-            globalThis.rlAcquire.mockRejectedValue(new Error('Rate limiter reset'));
-            expect((await send({ action: 'rateAcquire' })).response).toEqual({ ok: false, error: 'Rate limiter reset' });
-        });
-
-        it('openWindowWithUrl opens the URL with the windows API', async () => {
-            const create = vi.fn().mockResolvedValue({ id: 3 });
-            const update = vi.fn();
-            globalThis.browser.windows = { create, update };
-            const { response } = await send({ action: 'openWindowWithUrl', url: 'moz-extension://test-id/popup.html?x=1' });
-            expect(response).toEqual({ ok: true });
-            expect(create).toHaveBeenCalledWith(expect.objectContaining({ url: 'moz-extension://test-id/popup.html?x=1', type: 'popup' }));
-            expect(update).toHaveBeenCalledWith(3, { focused: true });
-        });
-
-        it('openWindowWithUrl falls back to the tabs API', async () => {
-            globalThis.browser.tabs = { create: vi.fn().mockResolvedValue({ id: 2 }) };
-            expect((await send({ action: 'openWindowWithUrl', url: 'u' })).response).toEqual({ ok: true });
-        });
-
-        it('openWindowWithUrl reports a failed tab creation', async () => {
-            globalThis.browser.tabs = { create: vi.fn().mockResolvedValue(null) };
-            expect((await send({ action: 'openWindowWithUrl', url: 'u' })).response).toEqual({ ok: false, error: 'tab create' });
-        });
-
-        it('openWindowWithUrl reports when no window or tab API is available', async () => {
-            expect((await send({ action: 'openWindowWithUrl', url: 'u' })).response)
-                .toEqual({ ok: false, error: 'No window/tab API available' });
-        });
-
-        it('openWindowWithUrl reports an exception', async () => {
-            globalThis.browser.windows = { create: vi.fn().mockRejectedValue(new Error('denied')) };
-            expect((await send({ action: 'openWindowWithUrl', url: 'u' })).response).toEqual({ ok: false, error: 'denied' });
-        });
-    });
-
-    describe('Sender checks', () => {
-        beforeEach(async () => {
-            setupGlobals('firefox');
-            globalThis.browser.scripting = { executeScript: vi.fn().mockResolvedValue() };
-            await loadModule();
-        });
-
-        const EXTENSION_ACTIONS = [
-            ['getAuthToken', { serviceKey: 'mangalib' }],
-            ['cacheAuthToken', { serviceKey: 'mangalib', token: 'x' }],
-            ['authInvalidate', { serviceKey: 'mangalib' }],
-            ['rateAcquire', { serviceKey: 'mangalib' }],
-            ['rateThrottle', { ms: 1000 }],
-            ['openWindowWithUrl', { url: 'https://evil.example' }],
-            ['plugin:cache', { format: 'x', code: 'alert(1)' }],
-            ['plugin:exec', { tabId: 1, code: 'alert(1)' }]
-        ];
-
-        it.each(EXTENSION_ACTIONS)('Rejects %s from a content script on a service site', async (action, extra) => {
-            const { returned, response } = await send({ action, ...extra }, tabSender('https://mangalib.me/ru/manga/x'));
-            expect(returned).toBe(false);
-            expect(response).toEqual({ ok: false, error: 'forbidden' });
-        });
-
-        it('Rejects messages from another extension', async () => {
-            const { response } = await send({ action: 'plugin:exec', tabId: 1, code: 'x' }, { ...PAGE, id: 'other-ext' });
-            expect(response).toEqual({ ok: false, error: 'forbidden' });
-            expect(globalThis.browser.scripting.executeScript).not.toHaveBeenCalled();
-        });
-
-        it('Rejects messages without a sender or from a lookalike URL', async () => {
-            for (const sender of [undefined, null, {}]) {
-                const sendResponse = vi.fn();
-                expect(capturedMessageCb({ action: 'getAuthToken', serviceKey: 'x' }, sender, sendResponse)).toBe(false);
-                expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'forbidden' });
-            }
-            const lookalike = { id: EXT_ID, url: 'moz-extension://test-id.evil.example/popup.html' };
-            expect((await send({ action: 'getAuthToken', serviceKey: 'x' }, lookalike)).response)
-                .toEqual({ ok: false, error: 'forbidden' });
-            expect(globalThis.tsGetToken).not.toHaveBeenCalled();
-        });
-
-        it('Accepts extension actions from extension pages', async () => {
-            const { returned } = await send({ action: 'plugin:exec', tabId: 1, code: 'x' });
-            expect(returned).toBe(true);
-            expect(globalThis.browser.scripting.executeScript).toHaveBeenCalled();
-        });
-
-        it('Rejects openDownloadWindow from extension pages', async () => {
-            expect((await send({ action: 'openDownloadWindow' })).response).toEqual({ ok: false, error: 'forbidden' });
-        });
-
-        it('Rejects openDownloadWindow from tabs of other sites', async () => {
-            const { response } = await send({ action: 'openDownloadWindow' }, tabSender('https://other.com/manga/my-slug'));
-            expect(response).toEqual({ ok: false, error: 'forbidden' });
-        });
-
-        it('Rejects openDownloadWindow from a sender without a tab', async () => {
-            const { response } = await send({ action: 'openDownloadWindow' }, { id: EXT_ID });
-            expect(response).toEqual({ ok: false, error: 'forbidden' });
-        });
-    });
-
-    describe('openDownloadWindow', () => {
-        let create;
-        let update;
-
-        beforeEach(async () => {
-            setupGlobals('firefox');
-            await loadModule();
-            create = vi.fn().mockResolvedValue({ id: 1 });
-            update = vi.fn();
-            globalThis.browser.windows = { create, update };
-        });
-
-        const popupParams = () => Object.fromEntries(new URLSearchParams(create.mock.calls[0][0].url.split('?')[1]));
-
-        it('Opens the download window with only the title, service, format and tab', async () => {
-            const { response } = await send(
-                { action: 'openDownloadWindow', format: 'epub', rateLimit: 1, maxSizeMB: 1 },
-                tabSender('https://mangalib.me/ru/manga/my-manga?section=info', 7)
+            capturedMessageCb(
+                { action: 'fetchWithRateLimit', url: 'https://api.mangalib.me/data' },
+                {},
+                sendResponse,
             );
-            expect(response).toEqual({ ok: true });
-            expect(create.mock.calls[0][0].url.startsWith('moz-extension://test-id/popup.html?')).toBe(true);
-            expect(popupParams()).toEqual({ download: 'true', slug: 'my-manga', service: 'mangalib', format: 'epub', tabId: '7' });
-            expect(update).toHaveBeenCalledWith(1, { focused: true });
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({
+                ok: true,
+                status: 200,
+                body: '{"data":1}',
+                contentType: 'application/json',
+            });
         });
 
-        it('Uses fb2 by default and omits a missing tab id', async () => {
-            await send({ action: 'openDownloadWindow' }, tabSender('https://ranobelib.me/ru/book/my-book'));
-            expect(popupParams()).toEqual({ download: 'true', slug: 'my-book', service: 'ranobelib', format: 'fb2' });
+        it('Handles fetchWithRateLimit with custom options', async () => {
+            globalThis.fetch = vi.fn().mockResolvedValue({
+                ok: true,
+                status: 200,
+                text: vi.fn().mockResolvedValue('ok'),
+                headers: { get: vi.fn().mockReturnValue('text/plain') },
+            });
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                {
+                    action: 'fetchWithRateLimit',
+                    url: 'https://api.mangalib.me/data',
+                    options: { credentials: 'same-origin', headers: { 'X-Test': '1' } },
+                },
+                {},
+                sendResponse,
+            );
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(globalThis.fetch).toHaveBeenCalledWith(
+                'https://api.mangalib.me/data',
+                expect.objectContaining({ credentials: 'same-origin' }),
+            );
         });
 
-        it('Fails when the slug cannot be detected', async () => {
-            const { response } = await send({ action: 'openDownloadWindow' }, tabSender('https://mangalib.me/ru'));
-            expect(response).toEqual({ ok: false, error: 'Cannot detect slug or service' });
-            expect(create).not.toHaveBeenCalled();
+        it('Handles fetchWithRateLimit uses default credentials include in firefox', async () => {
+            globalThis.fetch = vi.fn().mockResolvedValue({
+                ok: true,
+                status: 200,
+                text: vi.fn().mockResolvedValue(''),
+                headers: { get: vi.fn().mockReturnValue(null) },
+            });
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'fetchWithRateLimit', url: 'https://example.com', options: {} },
+                {},
+                sendResponse,
+            );
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(globalThis.fetch).toHaveBeenCalledWith(
+                'https://example.com',
+                expect.objectContaining({ credentials: 'include' }),
+            );
         });
 
-        it('Does not focus a window without an id', async () => {
-            create.mockResolvedValue({});
-            expect((await send({ action: 'openDownloadWindow' }, tabSender('https://mangalib.me/ru/manga/x'))).response)
-                .toEqual({ ok: true });
-            expect(update).not.toHaveBeenCalled();
+        it('Handles fetchWithRateLimit http error', async () => {
+            globalThis.fetch = vi.fn().mockResolvedValue({
+                ok: false,
+                status: 500,
+                statusText: 'Internal Server Error',
+            });
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'fetchWithRateLimit', url: 'https://api.mangalib.me/data' },
+                {},
+                sendResponse,
+            );
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({
+                ok: false,
+                status: 500,
+                statusText: 'Internal Server Error',
+            });
         });
 
-        it('Reports a window that could not be created', async () => {
-            create.mockResolvedValue(null);
-            expect((await send({ action: 'openDownloadWindow' }, tabSender('https://mangalib.me/ru/manga/x'))).response)
-                .toEqual({ ok: false, error: 'window create' });
+        it('Handles fetchWithRateLimit fetch exception', async () => {
+            globalThis.fetch = vi.fn().mockRejectedValue(new Error('timeout'));
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'fetchWithRateLimit', url: 'https://api.mangalib.me/data' },
+                {},
+                sendResponse,
+            );
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: expect.stringContaining('timeout') });
         });
 
-        it('Reports an exception', async () => {
-            create.mockRejectedValue(new Error('boom'));
-            expect((await send({ action: 'openDownloadWindow' }, tabSender('https://mangalib.me/ru/manga/x'))).response)
-                .toEqual({ ok: false, error: 'boom' });
+        it('Handles fetchWithRateLimit tracks ranobelib service', async () => {
+            globalThis.fetch = vi.fn().mockResolvedValue({
+                ok: true, status: 200,
+                text: vi.fn().mockResolvedValue(''),
+                headers: { get: vi.fn().mockReturnValue(null) },
+            });
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'fetchWithRateLimit', url: 'https://ranobelib.me/api/v2/manga' },
+                {},
+                sendResponse,
+            );
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(mockTrackRequest).toHaveBeenCalledWith('ranobelib');
         });
 
-        it('Uses tabs.create when the windows API is unavailable', async () => {
-            delete globalThis.browser.windows;
+        it('Handles fetchWithRateLimit throttles and retries on 429', async () => {
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            globalThis.fetch = vi.fn()
+                .mockResolvedValueOnce({ ok: false, status: 429 })
+                .mockResolvedValue({
+                    ok: true, status: 200,
+                    text: vi.fn().mockResolvedValue('ok'),
+                    headers: { get: vi.fn().mockReturnValue('text/plain') },
+                });
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchWithRateLimit', url: 'https://mangalib.me/api/test' }, {}, sendResponse);
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('fetchWithRateLimit 429 on attempt 1'));
+            expect(mockThrottle).toHaveBeenCalledWith(30000);
+            expect(mockTrackRequest).toHaveBeenCalledWith('429-retry');
+        });
+
+        it('Handles fetchImage success via tabs proxy', async () => {
+            const mockQuery = vi.fn().mockResolvedValue([{ id: 42 }]);
+            const mockSendMessage = vi.fn().mockResolvedValue({ ok: true, base64: 'AAAA', contentType: 'image/jpeg' });
+            globalThis.browser.tabs = { query: mockQuery, sendMessage: mockSendMessage };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img.mixlib.me/a.jpg' }, {}, sendResponse);
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(mockQuery).toHaveBeenCalledWith({ url: expect.arrayContaining(['*://mangalib.me/*']) });
+            expect(mockSendMessage).toHaveBeenCalledWith(42, { action: 'fetchImageFromTab', url: 'https://img.mixlib.me/a.jpg' });
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true, base64: 'AAAA', contentType: 'image/jpeg' });
+        });
+
+        it('Handles fetchImage queries ranobelib tabs for ranobelib url', async () => {
+            const mockQuery = vi.fn().mockResolvedValue([{ id: 7 }]);
+            const mockSendMessage = vi.fn().mockResolvedValue({ ok: true, base64: 'BBBB', contentType: 'image/png' });
+            globalThis.browser.tabs = { query: mockQuery, sendMessage: mockSendMessage };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://ranobelib.me/uploads/cover.jpg' }, {}, sendResponse);
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(mockQuery).toHaveBeenCalledWith({ url: ['*://ranobelib.me/*'] });
+        });
+
+        it('Handles fetchImage when no service tab found', async () => {
+            globalThis.browser.tabs = {
+                query: vi.fn().mockResolvedValue([]),
+                sendMessage: vi.fn(),
+            };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img.mixlib.me/a.jpg' }, {}, sendResponse);
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'No service tab found' });
+        });
+
+        it('Handles fetchImage when content script returns error', async () => {
+            globalThis.browser.tabs = {
+                query: vi.fn().mockResolvedValue([{ id: 5 }]),
+                sendMessage: vi.fn().mockResolvedValue({ ok: false, error: 'CORS error' }),
+            };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img.mixlib.me/a.jpg' }, {}, sendResponse);
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'CORS error' });
+        });
+
+        it('Handles fetchImage when content script returns null result', async () => {
+            globalThis.browser.tabs = {
+                query: vi.fn().mockResolvedValue([{ id: 5 }]),
+                sendMessage: vi.fn().mockResolvedValue(null),
+            };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img.mixlib.me/a.jpg' }, {}, sendResponse);
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'Content script returned no data' });
+        });
+
+        it('Handles fetchImage exception', async () => {
+            globalThis.browser.tabs = {
+                query: vi.fn().mockRejectedValue(new Error('tabs error')),
+                sendMessage: vi.fn(),
+            };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img.mixlib.me/a.jpg' }, {}, sendResponse);
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: expect.stringContaining('tabs error') });
+        });
+
+        it('Handles fetchImage via scripting.executeScript when injected fetch succeeds', async () => {
+            const mockExecuteScript = vi.fn().mockResolvedValue([
+                { result: { ok: true, base64: 'ZZZZ', contentType: 'image/png' } },
+            ]);
+            globalThis.browser.scripting = { executeScript: mockExecuteScript };
+            const mockSendMessage = vi.fn();
+            globalThis.browser.tabs = { query: vi.fn().mockResolvedValue([{ id: 9 }]), sendMessage: mockSendMessage };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img.mixlib.me/a.jpg' }, {}, sendResponse);
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(mockExecuteScript).toHaveBeenCalledWith(expect.objectContaining({
+                target: { tabId: 9 },
+                func: expect.any(Function),
+                args: ['https://img.mixlib.me/a.jpg'],
+            }));
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true, base64: 'ZZZZ', contentType: 'image/png' });
+            expect(mockSendMessage).not.toHaveBeenCalled();
+        });
+
+        it('Falls back to tabs.sendMessage when scripting.executeScript yields no usable result', async () => {
+            const mockExecuteScript = vi.fn().mockResolvedValue([{ result: null }]);
+            globalThis.browser.scripting = { executeScript: mockExecuteScript };
+            const mockSendMessage = vi.fn().mockResolvedValue({ ok: true, base64: 'FFFF', contentType: 'image/jpeg' });
+            globalThis.browser.tabs = { query: vi.fn().mockResolvedValue([{ id: 9 }]), sendMessage: mockSendMessage };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img.mixlib.me/a.jpg' }, {}, sendResponse);
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(mockSendMessage).toHaveBeenCalled();
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true, base64: 'FFFF', contentType: 'image/jpeg' });
+        });
+
+        describe('fetchImage injected func (in-tab fetch)', () => {
+            async function captureInjectedFunc() {
+                let capturedFunc;
+                globalThis.browser.scripting = {
+                    executeScript: vi.fn().mockImplementation(async ({ func }) => {
+                        capturedFunc = func;
+                        return [{ result: null }];
+                    }),
+                };
+                globalThis.browser.tabs = {
+                    query: vi.fn().mockResolvedValue([{ id: 1 }]),
+                    sendMessage: vi.fn().mockResolvedValue(null),
+                };
+
+                const sendResponse = vi.fn();
+                capturedMessageCb({ action: 'fetchImage', url: 'https://img.mixlib.me/a.jpg' }, {}, sendResponse);
+                await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+                return capturedFunc;
+            }
+
+            it('returns base64 payload with blob content type on successful fetch', async () => {
+                const capturedFunc = await captureInjectedFunc();
+
+                const OrigFileReader = globalThis.FileReader;
+                globalThis.fetch = vi.fn().mockResolvedValue({
+                    ok: true,
+                    blob: vi.fn().mockResolvedValue({ type: 'image/png' }),
+                });
+                globalThis.FileReader = class {
+                    readAsDataURL() {
+                        this.result = 'data:image/png;base64,INJECTED';
+                        setTimeout(() => this.onloadend(), 0);
+                    }
+                };
+
+                const result = await capturedFunc('https://img.mixlib.me/a.jpg');
+                expect(result).toEqual({ ok: true, base64: 'INJECTED', contentType: 'image/png' });
+                globalThis.FileReader = OrigFileReader;
+            });
+
+            it('falls back to image/jpeg content type when blob.type is empty', async () => {
+                const capturedFunc = await captureInjectedFunc();
+
+                const OrigFileReader = globalThis.FileReader;
+                globalThis.fetch = vi.fn().mockResolvedValue({
+                    ok: true,
+                    blob: vi.fn().mockResolvedValue({ type: '' }),
+                });
+                globalThis.FileReader = class {
+                    readAsDataURL() {
+                        this.result = 'data:image/jpeg;base64,INJECTED2';
+                        setTimeout(() => this.onloadend(), 0);
+                    }
+                };
+
+                const result = await capturedFunc('https://img.mixlib.me/a.jpg');
+                expect(result.contentType).toBe('image/jpeg');
+                globalThis.FileReader = OrigFileReader;
+            });
+
+            it('returns null when the in-tab fetch response is not ok', async () => {
+                const capturedFunc = await captureInjectedFunc();
+                globalThis.fetch = vi.fn().mockResolvedValue({ ok: false });
+
+                const result = await capturedFunc('https://img.mixlib.me/a.jpg');
+                expect(result).toBeNull();
+            });
+
+            it('returns null when the in-tab fetch throws', async () => {
+                const capturedFunc = await captureInjectedFunc();
+                globalThis.fetch = vi.fn().mockRejectedValue(new Error('network down'));
+
+                const result = await capturedFunc('https://img.mixlib.me/a.jpg');
+                expect(result).toBeNull();
+            });
+        });
+
+        it('Handles fetchImage tracks rate limit for detected service', async () => {
+            globalThis.browser.tabs = {
+                query: vi.fn().mockResolvedValue([{ id: 1 }]),
+                sendMessage: vi.fn().mockResolvedValue({ ok: true, base64: 'X', contentType: 'image/jpeg' }),
+            };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://cover.cdnlibs.org/manga/cover.jpg' }, {}, sendResponse);
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(mockTrackRequest).toHaveBeenCalledWith('mangalib');
+        });
+
+        it('isCdnImageUrl returns false for invalid URL (routes through tabs proxy)', async () => {
+            globalThis.browser.tabs = {
+                query: vi.fn().mockResolvedValue([{ id: 1 }]),
+                sendMessage: vi.fn().mockResolvedValue({ ok: true, base64: 'X', contentType: 'image/jpeg' }),
+            };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'not-a-url' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(globalThis.browser.tabs.query).toHaveBeenCalled();
+        });
+
+        it('fetchImage routes CDN URL through fetchImageFromBackground (success)', async () => {
+            const mockBlob = new Blob(['data'], { type: 'image/png' });
+            globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, blob: vi.fn().mockResolvedValue(mockBlob) });
+            const OrigFileReader = globalThis.FileReader;
+            globalThis.FileReader = class {
+                readAsDataURL() {
+                    this.result = 'data:image/png;base64,MOCKBASE64';
+                    setTimeout(() => this.onloadend(), 0);
+                }
+            };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img3.mixlib.me/manga/img.jpg' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(globalThis.fetch).toHaveBeenCalledWith('https://img3.mixlib.me/manga/img.jpg', { credentials: 'omit' });
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true, base64: 'MOCKBASE64', contentType: 'image/png' });
+            globalThis.FileReader = OrigFileReader;
+        });
+
+        it('fetchImageFromBackground returns HTTP error when response not ok', async () => {
+            globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 503 });
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img3.mixlib.me/img.jpg' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'HTTP 503' });
+        });
+
+        it('fetchImageFromBackground returns FileReader error on reader onerror', async () => {
+            const mockBlob = new Blob(['x'], { type: 'image/jpeg' });
+            globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, blob: vi.fn().mockResolvedValue(mockBlob) });
+            const OrigFileReader = globalThis.FileReader;
+            globalThis.FileReader = class {
+                readAsDataURL() { setTimeout(() => this.onerror(), 0); }
+            };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img3.mixlib.me/img.jpg' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'FileReader error' });
+            globalThis.FileReader = OrigFileReader;
+        });
+
+        it('fetchImageFromBackground returns error when fetch throws', async () => {
+            globalThis.fetch = vi.fn().mockRejectedValue(new Error('network failure'));
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img3.mixlib.me/img.jpg' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: expect.stringContaining('network failure') });
+        });
+
+        it('fetchImageFromBackground uses image/jpeg fallback when blob.type is empty', async () => {
+            const mockBlob = new Blob(['data']);
+            globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, blob: vi.fn().mockResolvedValue(mockBlob) });
+            const OrigFileReader = globalThis.FileReader;
+            globalThis.FileReader = class {
+                readAsDataURL() {
+                    this.result = 'data:application/octet-stream;base64,AAA';
+                    setTimeout(() => this.onloadend(), 0);
+                }
+            };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img3.mixlib.me/img.jpg' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true, base64: 'AAA', contentType: 'image/jpeg' });
+            globalThis.FileReader = OrigFileReader;
+        });
+
+        it('Handles openDownloadWindow with no tab URL', async () => {
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'openDownloadWindow', format: 'epub' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'No tab URL' });
+        });
+
+        it('Handles openDownloadWindow when slug or service cannot be detected', async () => {
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'epub' },
+                { tab: { url: 'https://mangalib.me/some-page' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'Cannot detect slug or service' });
+        });
+
+        it('Handles openDownloadWindow success and updates window focus', async () => {
+            const mockCreate = vi.fn().mockResolvedValue({ id: 42 });
+            const mockUpdate = vi.fn().mockResolvedValue({});
+            globalThis.browser.windows = { create: mockCreate, update: mockUpdate };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'epub' },
+                { tab: { url: 'https://mangalib.me/manga/my-manga/chapter-1' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true });
+            expect(mockUpdate).toHaveBeenCalledWith(42, { focused: true });
+        });
+
+        it('Handles openDownloadWindow without win.id (no update call)', async () => {
+            const mockCreate = vi.fn().mockResolvedValue({});
+            const mockUpdate = vi.fn();
+            globalThis.browser.windows = { create: mockCreate, update: mockUpdate };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'fb2' },
+                { tab: { url: 'https://ranobelib.me/book/my-ranobe' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true });
+            expect(mockUpdate).not.toHaveBeenCalled();
+        });
+
+        it('Handles openDownloadWindow with default format fb2', async () => {
+            const mockCreate = vi.fn().mockResolvedValue({ id: 1 });
+            globalThis.browser.windows = { create: mockCreate, update: vi.fn() };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow' },
+                { tab: { url: 'https://mangalib.me/manga/slug' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            const createCall = mockCreate.mock.calls[0][0];
+            expect(createCall.url).toContain('format=fb2');
+        });
+
+        it('Handles openDownloadWindow exception', async () => {
+            globalThis.browser.windows = {
+                create: vi.fn().mockRejectedValue(new Error('window fail')),
+                update: vi.fn(),
+            };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'epub' },
+                { tab: { url: 'https://mangalib.me/manga/my-manga' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: expect.stringContaining('window fail') });
+        });
+
+        it('Handles openDownloadWindow when windows.create returns null (ok=false)', async () => {
+            globalThis.browser.windows = {
+                create: vi.fn().mockResolvedValue(null),
+                update: vi.fn(),
+            };
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'fb2' },
+                { tab: { url: 'https://mangalib.me/manga/my-manga' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'window create' });
+        });
+
+        it('Handles openDownloadWindow using tabs.create when windows is unavailable', async () => {
             globalThis.browser.tabs = { create: vi.fn().mockResolvedValue({ id: 5 }) };
-            expect((await send({ action: 'openDownloadWindow' }, tabSender('https://mangalib.me/ru/manga/x'))).response)
-                .toEqual({ ok: true });
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'epub' },
+                { tab: { url: 'https://mangalib.me/manga/my-manga' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true });
         });
 
-        it('Reports when neither windows nor tabs API is available', async () => {
-            delete globalThis.browser.windows;
-            expect((await send({ action: 'openDownloadWindow' }, tabSender('https://mangalib.me/ru/manga/x'))).response)
-                .toEqual({ ok: false, error: 'No window/tab API available' });
+        it('Handles openDownloadWindow when neither windows nor tabs API is available', async () => {
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'epub' },
+                { tab: { url: 'https://mangalib.me/manga/my-manga' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'No window/tab API available' });
+        });
+
+        it('Handles openWindowWithUrl with windows API', async () => {
+            const mockCreate = vi.fn().mockResolvedValue({ id: 99 });
+            const mockUpdate = vi.fn();
+            globalThis.browser.windows = { create: mockCreate, update: mockUpdate };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'openWindowWithUrl', url: 'popup.html?download=true' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true });
+            expect(mockUpdate).toHaveBeenCalledWith(99, { focused: true });
+        });
+
+        it('Handles openWindowWithUrl with tabs API when windows unavailable', async () => {
+            globalThis.browser.tabs = { create: vi.fn().mockResolvedValue({ id: 5 }) };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'openWindowWithUrl', url: 'popup.html?download=true' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true });
+        });
+
+        it('Handles openWindowWithUrl when neither windows nor tabs API is available', async () => {
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'openWindowWithUrl', url: 'popup.html?download=true' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'No window/tab API available' });
+        });
+
+        it('Handles openWindowWithUrl when tabs.create returns null', async () => {
+            globalThis.browser.tabs = { create: vi.fn().mockResolvedValue(null) };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'openWindowWithUrl', url: 'popup.html?download=true' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'tab create' });
+        });
+
+        it('Handles openWindowWithUrl exception', async () => {
+            globalThis.browser.windows = {
+                create: vi.fn().mockRejectedValue(new Error('create fail')),
+                update: vi.fn(),
+            };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'openWindowWithUrl', url: 'popup.html?download=true' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: expect.stringContaining('create fail') });
+        });
+    });
+
+    describe('Chrome credentials', () => {
+        beforeEach(async () => {
+            setupGlobals('chrome');
+            await loadModule();
+        });
+
+        it('Uses omit credentials for fetchWithRateLimit in chrome', async () => {
+            globalThis.fetch = vi.fn().mockResolvedValue({
+                ok: true, status: 200,
+                text: vi.fn().mockResolvedValue(''),
+                headers: { get: vi.fn().mockReturnValue(null) },
+            });
+
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'fetchWithRateLimit', url: 'https://example.com', options: {} },
+                {},
+                sendResponse,
+            );
+
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(globalThis.fetch).toHaveBeenCalledWith(
+                'https://example.com',
+                expect.objectContaining({ credentials: 'omit' }),
+            );
         });
     });
 
     describe('No browser API available', () => {
         it('Does not crash when no browser API', async () => {
             setupGlobals('none');
-            await expect(loadModule()).resolves.toBeUndefined();
+            await expect(loadModule()).resolves.not.toThrow();
         });
     });
 
-    describe('openDownloadWindow on plugin sites', () => {
-        beforeEach(async () => {
-            await loadWithPlugins([{ service: 'myplugin', hosts: ['myplugin.com'] }]);
+    describe('Global initialization', () => {
+        it('Uses globalRateLimiter when available', async () => {
+            setupGlobals('firefox');
+            await loadModule();
+            expect(globalThis.RateLimiter).not.toHaveBeenCalled();
         });
 
-        it('Accepts tabs of service plugin sites and detects the plugin service', async () => {
-            const create = vi.fn().mockResolvedValue({ id: 1 });
-            globalThis.browser.windows = { create, update: vi.fn() };
-            const { response } = await send(
-                { action: 'openDownloadWindow', format: 'epub' }, tabSender('https://myplugin.com/manga/my-slug'));
-            expect(response).toEqual({ ok: true });
-            const urlArg = create.mock.calls[0][0].url;
+        it('Creates new RateLimiter when globalRateLimiter is missing', async () => {
+            setupGlobals('firefox');
+            globalThis.globalRateLimiter = null;
+            globalThis.RateLimiter = vi.fn(function () {
+                this.trackRequest = mockTrackRequest;
+                this.setLimit = mockSetLimit;
+                this.getStats = mockGetStats;
+            });
+            await loadModule();
+            expect(globalThis.RateLimiter).toHaveBeenCalledWith({ maxRequestsPerMinute: 80 });
+        });
+
+        it('Initializes authTokenStore when not present', async () => {
+            setupGlobals('firefox');
+            delete globalThis.authTokenStore;
+            await loadModule();
+            expect(globalThis.authTokenStore).toBeDefined();
+        });
+
+        it('Module itself creates authTokenStore when not pre-set before import', async () => {
+            setupGlobals('firefox');
+            vi.resetModules();
+            delete globalThis.authTokenStore;
+            await import('../../background/MessageRouter.js');
+            expect(globalThis.authTokenStore).toBeDefined();
+        });
+
+        it('Falls back gracefully when detectServiceByUrl is not set', async () => {
+            setupGlobals('firefox');
+            delete globalThis.detectServiceByUrl;
+
+            globalThis.browser.tabs = {
+                query: vi.fn().mockResolvedValue([{ id: 1 }]),
+                sendMessage: vi.fn().mockResolvedValue({ ok: true, base64: 'X', contentType: 'image/jpeg' }),
+            };
+
+            await loadModule();
+
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'fetchImage', url: 'https://img.mixlib.me/a.jpg' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith(expect.objectContaining({ ok: true }));
+        });
+    });
+
+    describe('With getExtensionApi defined', () => {
+        it('Calls getExtensionApi when defined as a function', async () => {
+            setupGlobals('chrome');
+            const apiObj = {
+                webRequest: { onBeforeSendHeaders: { addListener: vi.fn() }, onBeforeRequest: { addListener: vi.fn() } },
+                runtime: { onMessage: { addListener: vi.fn() }, id: 'ext-id', getURL: vi.fn(p => p) },
+                declarativeNetRequest: {}
+            };
+            globalThis.getExtensionApi = vi.fn(() => apiObj);
+            globalThis.getBrowserEnv = vi.fn(() => ({
+                isFirefox: false,
+                isChromium: true,
+                supportsDnr: false
+            }));
+            await loadModule();
+            expect(globalThis.getExtensionApi).toHaveBeenCalled();
+        });
+    });
+
+    describe('fetchImage plugin service paths', () => {
+        beforeEach(async () => {
+            setupGlobals('firefox');
+            await loadModule();
+        });
+
+        it('Uses pluginServiceHosts patterns when serviceKey is a plugin', async () => {
+            globalThis.pluginServiceHosts = { myplugin: ['myplugin.com'] };
+            globalThis.browser.tabs = {
+                query: vi.fn().mockResolvedValue([{ id: 3 }]),
+                sendMessage: vi.fn().mockResolvedValue({ ok: true, base64: 'ZZ', contentType: 'image/webp' }),
+            };
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'fetchImage', url: 'https://myplugin.com/img.webp', serviceKey: 'myplugin' },
+                {}, sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true, base64: 'ZZ', contentType: 'image/webp' });
+            expect(globalThis.browser.tabs.query).toHaveBeenCalledWith({ url: ['*://myplugin.com/*'] });
+            delete globalThis.pluginServiceHosts;
+        });
+
+        it('Responds with error when pluginServiceHosts has no hosts for service', async () => {
+            globalThis.pluginServiceHosts = {};
+            globalThis.browser.tabs = { query: vi.fn(), sendMessage: vi.fn() };
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'fetchImage', url: 'https://myplugin.com/img.webp', serviceKey: 'myplugin' },
+                {}, sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'No tab patterns for service: myplugin' });
+            delete globalThis.pluginServiceHosts;
+        });
+    });
+
+    describe('openDownloadWindow plugin paths', () => {
+        beforeEach(async () => {
+            setupGlobals('firefox');
+            await loadModule();
+        });
+
+        it('Detects service via pluginServiceHosts when detectServiceByUrl returns null', async () => {
+            globalThis.pluginServiceHosts = { myplugin: ['myplugin.com'] };
+            const mockCreate = vi.fn().mockResolvedValue({ id: 1 });
+            globalThis.browser.windows = { create: mockCreate, update: vi.fn() };
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'epub' },
+                { tab: { url: 'https://myplugin.com/manga/my-slug' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true });
+            const urlArg = mockCreate.mock.calls[0][0].url;
             expect(urlArg).toContain('service=myplugin');
             expect(urlArg).toContain('slug=my-slug');
+            delete globalThis.pluginServiceHosts;
         });
 
-        it('Accepts subdomains of plugin hosts', async () => {
-            expect(await detectedServiceFor('https://sub.myplugin.com/manga/my-slug')).toBe('myplugin');
+        it('Detects service via pluginServiceHosts using subdomain match', async () => {
+            globalThis.pluginServiceHosts = { myplugin: ['myplugin.com'] };
+            const mockCreate = vi.fn().mockResolvedValue({ id: 1 });
+            globalThis.browser.windows = { create: mockCreate, update: vi.fn() };
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'epub' },
+                { tab: { url: 'https://sub.myplugin.com/manga/my-slug' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true });
+            delete globalThis.pluginServiceHosts;
         });
 
-        it('Rejects sites that match no plugin host', async () => {
-            const { response } = await send({ action: 'openDownloadWindow' }, tabSender('https://other.com/manga/my-slug'));
-            expect(response).toEqual({ ok: false, error: 'forbidden' });
+        it('Fails when hostname matches no pluginServiceHosts entry', async () => {
+            globalThis.pluginServiceHosts = { myplugin: ['myplugin.com'] };
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'epub' },
+                { tab: { url: 'https://other.com/manga/my-slug' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'Cannot detect slug or service' });
+            delete globalThis.pluginServiceHosts;
         });
 
-        it('Rejects plugin sites once the plugin is removed', async () => {
-            await loadWithPlugins([]);
-            const { response } = await send({ action: 'openDownloadWindow' }, tabSender('https://myplugin.com/manga/my-slug'));
-            expect(response).toEqual({ ok: false, error: 'forbidden' });
+        it('Falls back to empty object when pluginServiceHosts is not defined', async () => {
+            delete globalThis.pluginServiceHosts;
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'epub' },
+                { tab: { url: 'https://other.com/manga/my-slug' } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'Cannot detect slug or service' });
+        });
+
+        it('Includes tabId in popup URL when sender.tab.id is present', async () => {
+            const mockCreate = vi.fn().mockResolvedValue({ id: 1 });
+            globalThis.browser.windows = { create: mockCreate, update: vi.fn() };
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'openDownloadWindow', format: 'epub' },
+                { tab: { url: 'https://mangalib.me/manga/my-manga', id: 7 } },
+                sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            const urlArg = mockCreate.mock.calls[0][0].url;
+            expect(urlArg).toContain('tabId=7');
         });
     });
 
@@ -419,23 +998,38 @@ describe('MessageRouter', () => {
 
         it('Stores plugin in IDB on success', async () => {
             const { mockObjectStore } = makeMockIdb();
-            const { response } = await send({ action: 'plugin:cache', format: 'myformat', code: 'console.log(1)' });
-            expect(response).toEqual({ ok: true, swStatus: expect.any(String) });
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'plugin:cache', format: 'myformat', code: 'console.log(1)' },
+                {}, sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true, swStatus: expect.any(String) });
             expect(mockObjectStore.put).toHaveBeenCalledWith({ format: 'myformat', code: 'console.log(1)' });
         });
 
         it('Handles IDB transaction error', async () => {
             vi.spyOn(console, 'warn').mockImplementation(() => {});
             makeMockIdb({ failTx: true });
-            const { response } = await send({ action: 'plugin:cache', format: 'myformat', code: 'code' });
-            expect(response).toEqual({ ok: false, error: 'tx error', swStatus: expect.any(String) });
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'plugin:cache', format: 'myformat', code: 'code' },
+                {}, sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'tx error', swStatus: expect.any(String) });
         });
 
         it('Handles IDB open error', async () => {
             vi.spyOn(console, 'warn').mockImplementation(() => {});
             makeMockIdb({ failOpen: true });
-            const { response } = await send({ action: 'plugin:cache', format: 'myformat', code: 'code' });
-            expect(response).toEqual({ ok: false, error: 'open error', swStatus: expect.any(String) });
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'plugin:cache', format: 'myformat', code: 'code' },
+                {}, sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'open error', swStatus: expect.any(String) });
         });
     });
 
@@ -458,8 +1052,13 @@ describe('MessageRouter', () => {
         it('Stores plugin via Cache API in SW context', async () => {
             const mockPut = vi.fn().mockResolvedValue();
             globalThis.caches = { open: vi.fn().mockResolvedValue({ put: mockPut }) };
-            const { response } = await send({ action: 'plugin:cache', format: 'sw-fmt', code: 'code here' });
-            expect(response).toEqual({ ok: true, swStatus: 'sw-background' });
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'plugin:cache', format: 'sw-fmt', code: 'code here' },
+                {}, sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true, swStatus: 'sw-background' });
             expect(globalThis.caches.open).toHaveBeenCalledWith('dl-plugins-v1');
             expect(mockPut).toHaveBeenCalledWith('/plugin-runtime/sw-fmt.js', expect.any(Object));
         });
@@ -467,8 +1066,13 @@ describe('MessageRouter', () => {
         it('Handles Cache API error in SW context', async () => {
             vi.spyOn(console, 'warn').mockImplementation(() => {});
             globalThis.caches = { open: vi.fn().mockRejectedValue(new Error('cache error')) };
-            const { response } = await send({ action: 'plugin:cache', format: 'sw-fmt', code: 'code' });
-            expect(response).toEqual({ ok: false, error: 'cache error', swStatus: 'sw-background' });
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'plugin:cache', format: 'sw-fmt', code: 'code' },
+                {}, sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'cache error', swStatus: 'sw-background' });
         });
     });
 
@@ -505,11 +1109,12 @@ describe('MessageRouter', () => {
             globalThis.navigator = origNavigator;
         });
 
-        const swStatus = async () => (await send({ action: 'plugin:cache', format: 'f', code: 'c' })).response.swStatus;
-
         it('Returns not-registered when no SW registration found', async () => {
             globalThis.navigator = { serviceWorker: { getRegistration: vi.fn().mockResolvedValue(null) } };
-            expect(await swStatus()).toBe('not-registered');
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'plugin:cache', format: 'f', code: 'c' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse.mock.calls[0][0].swStatus).toBe('not-registered');
         });
 
         it('Returns registered:activated when active SW found', async () => {
@@ -518,7 +1123,10 @@ describe('MessageRouter', () => {
                     getRegistration: vi.fn().mockResolvedValue({ active: { state: 'activated' }, installing: null, waiting: null }),
                 },
             };
-            expect(await swStatus()).toBe('registered:activated');
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'plugin:cache', format: 'f', code: 'c' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse.mock.calls[0][0].swStatus).toBe('registered:activated');
         });
 
         it('Returns registered:installing from installing state', async () => {
@@ -527,17 +1135,30 @@ describe('MessageRouter', () => {
                     getRegistration: vi.fn().mockResolvedValue({ active: null, installing: { state: 'installing' }, waiting: null }),
                 },
             };
-            expect(await swStatus()).toBe('registered:installing');
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'plugin:cache', format: 'f', code: 'c' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse.mock.calls[0][0].swStatus).toBe('registered:installing');
         });
 
         it('Returns registered:unknown when SW has no recognizable state', async () => {
-            globalThis.navigator = { serviceWorker: { getRegistration: vi.fn().mockResolvedValue({}) } };
-            expect(await swStatus()).toBe('registered:unknown');
+            globalThis.navigator = {
+                serviceWorker: { getRegistration: vi.fn().mockResolvedValue({}) },
+            };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'plugin:cache', format: 'f', code: 'c' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse.mock.calls[0][0].swStatus).toBe('registered:unknown');
         });
 
         it('Returns error string when getRegistration throws', async () => {
-            globalThis.navigator = { serviceWorker: { getRegistration: vi.fn().mockRejectedValue(new Error('sw error')) } };
-            expect(await swStatus()).toBe('error:sw error');
+            globalThis.navigator = {
+                serviceWorker: { getRegistration: vi.fn().mockRejectedValue(new Error('sw error')) },
+            };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'plugin:cache', format: 'f', code: 'c' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse.mock.calls[0][0].swStatus).toBe('error:sw error');
         });
     });
 
@@ -554,8 +1175,13 @@ describe('MessageRouter', () => {
         it('Executes plugin script in specified tab', async () => {
             const mockExecuteScript = vi.fn().mockResolvedValue();
             globalThis.browser.scripting = { executeScript: mockExecuteScript };
-            const { response } = await send({ action: 'plugin:exec', tabId: 42, code: 'console.log("hi")' });
-            expect(response).toEqual({ ok: true });
+            const sendResponse = vi.fn();
+            capturedMessageCb(
+                { action: 'plugin:exec', tabId: 42, code: 'console.log("hi")' },
+                {}, sendResponse,
+            );
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: true });
             expect(mockExecuteScript).toHaveBeenCalledWith({
                 target: { tabId: 42 },
                 func: expect.any(Function),
@@ -566,43 +1192,42 @@ describe('MessageRouter', () => {
         });
 
         it('Responds with error when scripting.executeScript not available', async () => {
-            vi.spyOn(console, 'warn').mockImplementation(() => {});
-            expect((await send({ action: 'plugin:exec', tabId: 42, code: 'code' })).response)
-                .toEqual({ ok: false, error: 'scripting.executeScript not available' });
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'plugin:exec', tabId: 42, code: 'code' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'scripting.executeScript not available' });
         });
 
         it('Responds with error when tabId is missing', async () => {
-            vi.spyOn(console, 'warn').mockImplementation(() => {});
             globalThis.browser.scripting = { executeScript: vi.fn() };
-            expect((await send({ action: 'plugin:exec', code: 'code' })).response)
-                .toEqual({ ok: false, error: 'No tabId provided' });
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'plugin:exec', code: 'code' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'No tabId provided' });
         });
 
         it('Responds with error when executeScript throws', async () => {
             vi.spyOn(console, 'warn').mockImplementation(() => {});
-            globalThis.browser.scripting = { executeScript: vi.fn().mockRejectedValue(new Error('exec error')) };
-            expect((await send({ action: 'plugin:exec', tabId: 10, code: 'code' })).response)
-                .toEqual({ ok: false, error: 'exec error' });
+            globalThis.browser.scripting = {
+                executeScript: vi.fn().mockRejectedValue(new Error('exec error')),
+            };
+            const sendResponse = vi.fn();
+            capturedMessageCb({ action: 'plugin:exec', tabId: 10, code: 'code' }, {}, sendResponse);
+            await vi.waitFor(() => expect(sendResponse).toHaveBeenCalled());
+            expect(sendResponse).toHaveBeenCalledWith({ ok: false, error: 'exec error' });
         });
     });
 
-    describe('_syncContentScripts', () => {
+    describe('_syncPluginContentScripts', () => {
         let mockRegister;
         let mockGetRegistered;
         let mockUnregister;
         let capturedStorageChangeCb;
 
-        const JS = ['/content/AdCleaner.js', '/content/DownloadButton.js'];
-        const BUILTIN_SCRIPTS = [
-            { id: 'dl-service-mangalib', matches: ['https://mangalib.me/*', 'https://mangalib.org/*'], js: JS, runAt: 'document_idle' },
-            { id: 'dl-service-ranobelib', matches: ['https://ranobelib.me/*'], js: JS, runAt: 'document_idle' }
-        ];
-        const registeredIds = () => mockRegister.mock.calls.map(([scripts]) => scripts[0].id);
-
-        async function setupWithScripting(plugins = [], { existing = [], storageGet } = {}) {
+        async function setupWithScripting(plugins = []) {
             setupGlobals('firefox');
             mockRegister = vi.fn().mockResolvedValue();
-            mockGetRegistered = vi.fn().mockResolvedValue(existing);
+            mockGetRegistered = vi.fn().mockResolvedValue([]);
             mockUnregister = vi.fn().mockResolvedValue();
             capturedStorageChangeCb = null;
 
@@ -612,13 +1237,12 @@ describe('MessageRouter', () => {
                 unregisterContentScripts: mockUnregister,
             };
             globalThis.browser.storage = {
-                local: { get: storageGet || vi.fn().mockResolvedValue({ custom_plugins: plugins }) },
+                local: { get: vi.fn().mockResolvedValue({ custom_plugins: plugins }) },
                 onChanged: { addListener: vi.fn(cb => { capturedStorageChangeCb = cb; }) },
             };
 
             await loadModule();
             await vi.waitFor(() => expect(mockGetRegistered).toHaveBeenCalled());
-            await new Promise(resolve => setTimeout(resolve, 0));
         }
 
         it('Returns early when scripting API not available', async () => {
@@ -631,50 +1255,38 @@ describe('MessageRouter', () => {
             expect(mockAddListenerOnMessage).toHaveBeenCalled();
         });
 
-        it('Still learns plugin hosts when scripting.registerContentScripts is unavailable', async () => {
-            await loadWithPlugins([{ service: 'myplugin', hosts: ['myplugin.com'], enabled: true }]);
-            expect(await detectedServiceFor('https://myplugin.com/manga/slug')).toBe('myplugin');
+        it('Still populates pluginServiceHosts when scripting.registerContentScripts is unavailable', async () => {
+            setupGlobals('firefox');
+            const storageGet = vi.fn().mockResolvedValue({
+                custom_plugins: [{ service: 'myplugin', hosts: ['myplugin.com'], enabled: true }],
+            });
+            globalThis.browser.storage = {
+                local: { get: storageGet },
+                onChanged: { addListener: vi.fn() },
+            };
+            await loadModule();
+            await vi.waitFor(() => expect(storageGet).toHaveBeenCalled());
+            expect(globalThis.pluginServiceHosts).toEqual({ myplugin: ['myplugin.com'] });
+            delete globalThis.pluginServiceHosts;
         });
 
-        it('Registers content scripts for the built-in services from their config hosts', async () => {
-            await setupWithScripting([]);
-            expect(mockRegister).toHaveBeenCalledWith([BUILTIN_SCRIPTS[0]]);
-            expect(mockRegister).toHaveBeenCalledWith([BUILTIN_SCRIPTS[1]]);
-            expect(mockUnregister).not.toHaveBeenCalled();
-        });
-
-        it('Registers only built-in scripts when custom_plugins key is absent from storage', async () => {
-            await setupWithScripting([], { storageGet: vi.fn().mockResolvedValue({}) });
-            expect(registeredIds()).toEqual(['dl-service-mangalib', 'dl-service-ranobelib']);
-        });
-
-        it('Leaves up-to-date registrations untouched', async () => {
-            const existing = BUILTIN_SCRIPTS.map(s => ({
-                ...s,
-                js: s.js.map(path => path.slice(1)),
-                matches: [...s.matches].reverse(),
-                persistAcrossSessions: true
-            }));
-            await setupWithScripting([], { existing });
-            expect(mockUnregister).not.toHaveBeenCalled();
+        it('Uses empty array when custom_plugins key is absent from storage', async () => {
+            setupGlobals('firefox');
+            mockRegister = vi.fn().mockResolvedValue();
+            mockGetRegistered = vi.fn().mockResolvedValue([]);
+            mockUnregister = vi.fn().mockResolvedValue();
+            globalThis.browser.scripting = {
+                registerContentScripts: mockRegister,
+                getRegisteredContentScripts: mockGetRegistered,
+                unregisterContentScripts: mockUnregister,
+            };
+            globalThis.browser.storage = {
+                local: { get: vi.fn().mockResolvedValue({}) },
+                onChanged: { addListener: vi.fn() },
+            };
+            await loadModule();
+            await vi.waitFor(() => expect(mockGetRegistered).toHaveBeenCalled());
             expect(mockRegister).not.toHaveBeenCalled();
-        });
-
-        it('Re-registers registrations left from versions that injected ImageFetcher', async () => {
-            const existing = BUILTIN_SCRIPTS.map(s => ({ ...s, js: [...s.js, '/content/ImageFetcher.js'] }));
-            await setupWithScripting([], { existing });
-            expect(mockUnregister).toHaveBeenCalledWith({ ids: ['dl-service-mangalib', 'dl-service-ranobelib'] });
-            expect(registeredIds()).toEqual(['dl-service-mangalib', 'dl-service-ranobelib']);
-        });
-
-        it('Re-registers a registration whose hosts changed', async () => {
-            const existing = [
-                { ...BUILTIN_SCRIPTS[0], matches: ['https://old-mangalib.example/*'] },
-                BUILTIN_SCRIPTS[1]
-            ];
-            await setupWithScripting([], { existing });
-            expect(mockUnregister).toHaveBeenCalledWith({ ids: ['dl-service-mangalib'] });
-            expect(registeredIds()).toEqual(['dl-service-mangalib']);
         });
 
         it('Registers content scripts for enabled plugins', async () => {
@@ -682,10 +1294,10 @@ describe('MessageRouter', () => {
             await vi.waitFor(() => expect(mockRegister).toHaveBeenCalledWith([{
                 id: 'dl-plugin-myplugin',
                 matches: ['https://myplugin.com/*'],
-                js: JS,
+                js: ['/content/AdCleaner.js', '/content/DownloadButton.js', '/content/ImageFetcher.js'],
                 runAt: 'document_idle',
             }]));
-            expect(await detectedServiceFor('https://myplugin.com/manga/slug')).toBe('myplugin');
+            expect(globalThis.pluginServiceHosts).toEqual({ myplugin: ['myplugin.com'] });
         });
 
         it('Uses format as key when service is absent', async () => {
@@ -695,66 +1307,66 @@ describe('MessageRouter', () => {
 
         it('Skips plugins with no service or format key', async () => {
             await setupWithScripting([{ hosts: ['myplugin.com'] }]);
-            expect(registeredIds()).toEqual(['dl-service-mangalib', 'dl-service-ranobelib']);
+            expect(mockRegister).not.toHaveBeenCalled();
         });
 
         it('Skips disabled plugins', async () => {
             await setupWithScripting([{ service: 'myplugin', hosts: ['myplugin.com'], enabled: false }]);
-            expect(registeredIds()).toEqual(['dl-service-mangalib', 'dl-service-ranobelib']);
+            expect(mockRegister).not.toHaveBeenCalled();
         });
 
         it('Skips plugins with no hosts', async () => {
             await setupWithScripting([{ service: 'myplugin', hosts: [] }]);
-            expect(registeredIds()).toEqual(['dl-service-mangalib', 'dl-service-ranobelib']);
+            expect(mockRegister).not.toHaveBeenCalled();
         });
 
-        it('Unregisters stale plugin scripts and leaves foreign registrations alone', async () => {
-            await setupWithScripting([{ service: 'myplugin', hosts: ['myplugin.com'] }], {
-                existing: [{ id: 'dl-plugin-oldplugin' }, { id: 'other-script' }]
-            });
+        it('Unregisters old plugin scripts before registering new ones', async () => {
+            setupGlobals('firefox');
+            mockRegister = vi.fn().mockResolvedValue();
+            mockGetRegistered = vi.fn().mockResolvedValue([
+                { id: 'dl-plugin-oldplugin' },
+                { id: 'other-script' },
+            ]);
+            mockUnregister = vi.fn().mockResolvedValue();
+
+            globalThis.browser.scripting = {
+                registerContentScripts: mockRegister,
+                getRegisteredContentScripts: mockGetRegistered,
+                unregisterContentScripts: mockUnregister,
+            };
+            globalThis.browser.storage = {
+                local: { get: vi.fn().mockResolvedValue({ custom_plugins: [{ service: 'myplugin', hosts: ['myplugin.com'] }] }) },
+                onChanged: { addListener: vi.fn() },
+            };
+
+            await loadModule();
+            await vi.waitFor(() => expect(mockRegister).toHaveBeenCalled());
             expect(mockUnregister).toHaveBeenCalledWith({ ids: ['dl-plugin-oldplugin'] });
-            expect(registeredIds()).toContain('dl-plugin-myplugin');
         });
 
-        it('Does not call unregister when no stale scripts exist', async () => {
+        it('Does not call unregister when no old plugin scripts exist', async () => {
             await setupWithScripting([{ service: 'myplugin', hosts: ['myplugin.com'] }]);
             expect(mockUnregister).not.toHaveBeenCalled();
         });
 
-        it('Keeps plugin registrations and still registers built-ins when reading plugins fails', async () => {
-            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-            await setupWithScripting([], {
-                existing: [{ id: 'dl-plugin-myplugin', matches: ['https://myplugin.com/*'], js: JS }],
-                storageGet: vi.fn().mockRejectedValue(new Error('storage error'))
-            });
-            expect(warnSpy).toHaveBeenCalledWith('[MessageRouter] Failed to read custom plugins:', 'storage error');
-            expect(mockUnregister).not.toHaveBeenCalled();
-            expect(registeredIds()).toEqual(['dl-service-mangalib', 'dl-service-ranobelib']);
-        });
-
-        it('Keeps registering the rest when one registration fails', async () => {
+        it('Warns and skips registration when reading custom plugins throws', async () => {
             const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
             setupGlobals('firefox');
-            mockRegister = vi.fn(async ([script]) => {
-                if (script.id === 'dl-plugin-bad') throw new Error('Invalid match pattern');
-            });
-            mockGetRegistered = vi.fn().mockResolvedValue([]);
+            const mockRegister = vi.fn();
             globalThis.browser.scripting = {
                 registerContentScripts: mockRegister,
-                getRegisteredContentScripts: mockGetRegistered,
+                getRegisteredContentScripts: vi.fn(),
                 unregisterContentScripts: vi.fn(),
             };
             globalThis.browser.storage = {
-                local: { get: vi.fn().mockResolvedValue({ custom_plugins: [
-                    { service: 'bad', hosts: ['bad host'] },
-                    { service: 'good', hosts: ['good.example'] }
-                ] }) },
+                local: { get: vi.fn().mockRejectedValue(new Error('storage error')) },
                 onChanged: { addListener: vi.fn() },
             };
             await loadModule();
-            await vi.waitFor(() => expect(registeredIds()).toContain('dl-plugin-good'));
-            expect(warnSpy).toHaveBeenCalledWith(
-                '[MessageRouter] Failed to register content scripts dl-plugin-bad:', 'Invalid match pattern');
+            await vi.waitFor(() => expect(warnSpy).toHaveBeenCalledWith(
+                '[MessageRouter] Failed to read custom plugins:', 'storage error',
+            ));
+            expect(mockRegister).not.toHaveBeenCalled();
         });
 
         it('Handles error during sync gracefully', async () => {
@@ -771,7 +1383,7 @@ describe('MessageRouter', () => {
             };
             await loadModule();
             await vi.waitFor(() => expect(warnSpy).toHaveBeenCalledWith(
-                '[MessageRouter] Failed to sync content scripts:', 'scripting error',
+                '[MessageRouter] Failed to sync plugin content scripts:', 'scripting error',
             ));
         });
 

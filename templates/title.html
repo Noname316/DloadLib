@@ -4,15 +4,24 @@
 </div>
 <div id="releaseDate"></div>
 
-<div id="splitPagesContainer" style="display:none">
-    <label for="splitPagesCheckbox">Разделять страницы</label>
-    <input type="checkbox" id="splitPagesCheckbox">
-</div>
-
 <div id="formatContainer">
     <label for="formatSelector">Формат: </label>
     <select id="formatSelector"></select>
 </div>
+
+<div id="sourceModeContainer" style="display:none">
+    <label for="sourceModeSelect">Способ: </label>
+    <select id="sourceModeSelect">
+        <option value="api">Через API</option>
+        <option value="dom">Через DOM (поиск ссылок)</option>
+    </select>
+</div>
+
+<div id="saveFolderContainer" style="display:none">
+    <label for="saveSubfolderInput">Папка в «Загрузках»:</label>
+    <input type="text" id="saveSubfolderInput" placeholder="Можно оставить пустым">
+</div>
+<div id="saveFolderHint" style="display:none"></div>
 
 <div id="translatorContainer">
     <label for="translatorSelect">Перевод:</label>
@@ -24,6 +33,11 @@
         </button>
         <div id="translatorDropdownList" class="translator-dropdown-list" role="listbox" hidden></div>
     </div>
+</div>
+
+<div id="titleFolderContainer" class="settings-row" style="display:none">
+    <label class="settings-label" for="titleFolderCheckbox" title="Главы сохранятся в папку с названием тайтла внутри выбранной папки. Если такая папка уже есть, файлы добавятся в неё">Создать папку с названием тайтла</label>
+    <input type="checkbox" id="titleFolderCheckbox" class="settings-checkbox">
 </div>
 
 <div id="chapterRangeContainer">
@@ -40,6 +54,27 @@
 <div id="downloadInfoPanel"></div>
 <button id="downloadBtn">Скачать книгу</button>
 <div id="status"></div>
+<div id="statusDetail" style="display:none"></div>
+<details id="downloadStats" style="display:none">
+    <summary>
+        <span class="stats-summary-title">Отладочная информация</span>
+        <span id="statsSummary" class="stats-summary"></span>
+    </summary>
+    <!-- Строк всегда одинаковое число, каждая — ровно в одну строку: панель не «прыгает». -->
+    <div class="stats-grid">
+        <span class="stats-label">Время</span><span id="statsElapsed" class="stats-value">—</span>
+        <span class="stats-label">Главы</span><span id="statsChapters" class="stats-value">—</span>
+        <span class="stats-label">Страницы</span><span id="statsPages" class="stats-value">—</span>
+        <span class="stats-label">Объём</span><span id="statsBytes" class="stats-value">—</span>
+        <span class="stats-label">API</span><span id="statsLaneSite" class="stats-value">—</span>
+        <span class="stats-label">Картинки</span><span id="statsLaneImages" class="stats-value">—</span>
+        <span class="stats-label">Готовится</span><span id="statsPrefetch" class="stats-value">—</span>
+    </div>
+    <details id="statsLogWrap" open>
+        <summary>Журнал</summary>
+        <div id="statsLog" class="stats-log"></div>
+    </details>
+</details>
 <progress id="progress" value="0" max="100"></progress>
 
 <div id="downloadControls">

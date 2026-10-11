@@ -25,16 +25,19 @@ function makeImage({ naturalWidth = 200, naturalHeight = 400, fail = false } = {
 
 async function freshImport() {
     vi.resetModules();
-    return (await import('../../core/ImageCompressor.js')).ImageCompressor;
+    delete global.ImageCompressor;
+    await import('../../core/ImageCompressor.js');
+    return global.ImageCompressor;
 }
 
 afterEach(() => {
+    delete global.ImageCompressor;
     delete global.Image;
     delete global.document;
 });
 
 describe('ImageCompressor — module loading', () => {
-    it('exports the class and logs on load', async () => {
+    it('registers on global and logs on load', async () => {
         const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
         const cls = await freshImport();
         expect(cls).toBeDefined();

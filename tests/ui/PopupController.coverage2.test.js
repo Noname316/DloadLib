@@ -1,20 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-vi.mock('../../core/AuthManager.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('AuthManager'));
-vi.mock('../../core/BrowserApi.js', async () => (await import('../helpers/globalBridge.js'))
-    .globalBridge('extensionApi', 'browserEnv', 'fetchViaTab', 'setServiceTab'));
-vi.mock('../../core/DownloadHistory.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('DownloadHistory'));
-vi.mock('../../core/DownloadManager.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('DownloadManager'));
-vi.mock('../../core/PluginManager.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('PluginManager'));
-vi.mock('../../exporters/ExporterRegistry.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('ExporterRegistry'));
-vi.mock('../../services/mangalib/MangaLibService.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('MangaLibService'));
-vi.mock('../../services/ranobelib/RanobeLibService.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('RanobeLibService'));
-vi.mock('../../services/ServiceRegistry.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('serviceRegistry'));
-vi.mock('../../ui/ChapterController.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('ChapterController'));
-vi.mock('../../ui/HistoryController.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('HistoryController'));
-vi.mock('../../ui/SettingsController.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('SettingsController'));
-vi.mock('../../ui/TemplateLoader.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('TemplateLoader'));
-
 let PopupController;
 
 function setupDOM() {
@@ -40,6 +25,10 @@ function setupDOM() {
             <div id="formatContainer">
                 <select id="formatSelector"></select>
             </div>
+            <div id="fileInputContainer">
+                <input type="file" id="fileInput">
+                <button id="customFileBtn">Загрузить</button>
+            </div>
             <div id="downloadInfoPanel" style="display:none;"></div>
             <button id="downloadBtn"></button>
             <div id="status"></div>
@@ -54,6 +43,7 @@ function setupDOM() {
 
 beforeEach(async () => {
     vi.resetModules();
+    delete global.getExtensionApi;
     setupDOM();
 
     global.localStorage = { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() };
@@ -72,7 +62,7 @@ beforeEach(async () => {
         })),
         getService: vi.fn(() => null),
     };
-    global.extensionApi = {
+    global.browser = {
         runtime: { sendMessage: vi.fn(async () => ({ ok: true })), getURL: vi.fn(() => 'popup.html') },
         windows: { getCurrent: vi.fn(async () => ({ type: 'normal' })), create: vi.fn(async () => ({ id: 1 })), update: vi.fn() },
         tabs: { query: vi.fn(async () => ([{ url: 'https://ranobelib.me/manga/slug', id: 42 }])), create: vi.fn() }
@@ -87,11 +77,10 @@ beforeEach(async () => {
     global.fetchViaTab = vi.fn(async () => null);
     global.setServiceTab = vi.fn();
     global.fetch = vi.fn(async () => ({ json: async () => ({ workflow_runs: [] }) }));
-    global.browserEnv = { isFirefox: true };
-    global.PluginManager = { loadAll: vi.fn(async () => {}) };
-    global.SettingsController = { init: vi.fn() };
 
-    ({ PopupController } = await import('../../ui/PopupController.js'));
+    await import('../../core/MangaPatcher.js');
+    await import('../../ui/PopupController.js');
+    PopupController = global.PopupController;
 });
 
 afterEach(() => {
@@ -109,31 +98,11 @@ describe('_init settings callback', () => {
         global.TemplateLoader.show = vi.fn(async (name, cb) => { if (cb) await cb(); });
         global.SettingsController = { init: vi.fn() };
 
-        const controller = new PopupController();
+        new PopupController();
         await new Promise(r => setTimeout(r, 10));
 
-        expect(global.SettingsController.init).toHaveBeenCalledWith(expect.any(Function));
-        const restoreSpy = vi.spyOn(controller, '_restoreMainView').mockResolvedValue();
-        global.SettingsController.init.mock.calls[0][0]();
-        expect(restoreSpy).toHaveBeenCalled();
+        expect(global.SettingsController.init).toHaveBeenCalled();
         Object.defineProperty(window, 'location', { value: origLocation, writable: true });
-    });
-});
-
-describe('_bindShellEvents historyBtn', () => {
-    it('shows history and passes _restoreMainView as the back callback', async () => {
-        document.body.innerHTML += '<button id="historyBtn"></button>';
-        global.TemplateLoader.show = vi.fn(async (name, cb) => { if (cb) await cb(); });
-        const controller = new PopupController();
-        controller._shellEventsBound = false;
-        controller._bindShellEvents();
-        document.getElementById('historyBtn').click();
-        await Promise.resolve();
-        expect(global.TemplateLoader.show).toHaveBeenCalledWith('history', expect.any(Function));
-        expect(global.HistoryController.init).toHaveBeenCalledWith(expect.any(Function));
-        const restoreSpy = vi.spyOn(controller, '_restoreMainView').mockResolvedValue();
-        global.HistoryController.init.mock.calls[0][0]();
-        expect(restoreSpy).toHaveBeenCalled();
     });
 });
 
@@ -153,7 +122,7 @@ describe('_bindShellEvents settingsBtn', () => {
 describe('_init storage.onChanged listener', () => {
     beforeEach(() => {
         global.PluginManager = { loadAll: vi.fn().mockResolvedValue() };
-        global.extensionApi.storage = {
+        global.browser.storage = {
             onChanged: { addListener: vi.fn() }
         };
     });
@@ -161,12 +130,12 @@ describe('_init storage.onChanged listener', () => {
     async function getStorageListener() {
         new PopupController();
         await new Promise(r => setTimeout(r, 0));
-        return global.extensionApi.storage.onChanged.addListener.mock.calls[0]?.[0];
+        return global.browser.storage.onChanged.addListener.mock.calls[0]?.[0];
     }
 
     it('registers listener when storage.onChanged exists', async () => {
         await getStorageListener();
-        expect(global.extensionApi.storage.onChanged.addListener).toHaveBeenCalled();
+        expect(global.browser.storage.onChanged.addListener).toHaveBeenCalled();
     });
 
     it('listener early-returns when area is not local', async () => {
@@ -263,7 +232,7 @@ describe('_showWrongServiceState service links', () => {
         await controller._showWrongServiceState();
         document.querySelector('.ex1-link-btn').click();
         await Promise.resolve();
-        expect(global.extensionApi.tabs.create).toHaveBeenCalledWith({ url: 'https://example.com' });
+        expect(global.browser.tabs.create).toHaveBeenCalledWith({ url: 'https://example.com' });
     });
 });
 

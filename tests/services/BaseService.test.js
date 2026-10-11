@@ -1,16 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('../../core/BrowserApi.js', async () =>
-    (await import('../helpers/globalBridge.js')).globalBridge('extensionApi', 'requestViaTab'));
-vi.mock('../../core/RateLimitClient.js', async () =>
-    (await import('../helpers/globalBridge.js')).globalBridge('RateLimitClient'));
-
 let BaseService;
 
 beforeEach(async () => {
-    vi.resetModules();
-    global.RateLimitClient = { throttle: vi.fn() };
-    ({ BaseService } = await import('../../services/BaseService.js'));
+    const path = require.resolve('../../services/BaseService.js');
+    delete require.cache[path];
+    await import('../../services/BaseService.js');
+    BaseService = global.BaseService;
 });
 
 describe('BaseService', () => {
@@ -41,26 +37,35 @@ describe('BaseService', () => {
         expect(svc.extractPages({ pages: [] })).toEqual([]);
     });
 
-    it('Static matches returns false without a static config', () => {
-        expect(BaseService.matches('https://mangalib.me/')).toBe(false);
+    it('Static matches throws error', () => {
+        expect(() => BaseService.matches('url')).toThrow('matches must be implemented');
     });
 
-    it('Static matches uses the hosts of the subclass static config', () => {
-        class SiteService extends BaseService {
-            static config = { name: 'site', hosts: ['site.example'] };
-        }
-        expect(SiteService.matches('https://site.example/manga/x')).toBe(true);
-        expect(SiteService.matches('https://cdn.site.example/a.jpg')).toBe(true);
-        expect(SiteService.matches('https://othersite.example/')).toBe(false);
-        expect(SiteService.matches('not a url')).toBe(false);
-    });
-
-    it('extensionApi returns the shared BrowserApi instance', () => {
-        const fakeApi = { runtime: {} };
-        global.extensionApi = fakeApi;
+    it('extensionApi falls back to browser when getExtensionApi is not a function', () => {
+        delete global.getExtensionApi;
         const svc = new BaseService(config);
-        expect(svc.extensionApi).toBe(fakeApi);
-        delete global.extensionApi;
+        const fakeBrowser = { runtime: {} };
+        global.browser = fakeBrowser;
+        expect(svc.extensionApi).toBe(fakeBrowser);
+        delete global.browser;
+    });
+
+    it('extensionApi falls back to chrome when browser is not defined', () => {
+        delete global.getExtensionApi;
+        delete global.browser;
+        const svc = new BaseService(config);
+        const fakeChrome = { runtime: {} };
+        global.chrome = fakeChrome;
+        expect(svc.extensionApi).toBe(fakeChrome);
+        delete global.chrome;
+    });
+
+    it('extensionApi returns null when neither getExtensionApi, browser nor chrome are defined', () => {
+        delete global.getExtensionApi;
+        delete global.browser;
+        delete global.chrome;
+        const svc = new BaseService(config);
+        expect(svc.extensionApi).toBeNull();
     });
 
     it('Delay resolves after given ms', async () => {
@@ -95,6 +100,12 @@ describe('BaseService', () => {
         expect(delaySpy).toHaveBeenCalledTimes(2);
         delete global.requestViaTab;
         delaySpy.mockRestore();
+    });
+
+    it('_doFetch throws when global.requestViaTab is not a function', async () => {
+        const svc = new BaseService(config);
+        delete global.requestViaTab;
+        await expect(svc._doFetch('url', {})).rejects.toThrow('Откройте страницу тайтла');
     });
 
     it('_doFetch headers.get returns null for header names other than Retry-After', async () => {
@@ -157,18 +168,57 @@ describe('BaseService', () => {
         const delaySpy = vi.spyOn(svc, 'delay').mockResolvedValue();
         let on429Called = false;
         svc._on429 = (ms) => { on429Called = ms === 2000; };
-        global.RateLimitClient = { throttle: vi.fn() };
+        global.globalRateLimiter = { throttle: vi.fn() };
         const result = await svc.fetchWithRateLimitRetry('url', {}, 2);
         expect(result.status).toBe(200);
         expect(requestViaTabMock).toHaveBeenCalledTimes(2);
         expect(warnSpy).toHaveBeenCalledWith('[TestService] 429 Too Many Requests (attempt 1/2), waiting 2000ms...');
         expect(on429Called).toBe(true);
-        expect(global.RateLimitClient.throttle).toHaveBeenCalledWith(2000);
+        expect(global.globalRateLimiter.throttle).toHaveBeenCalledWith(2000);
         expect(delaySpy).toHaveBeenCalledWith(2000);
         warnSpy.mockRestore();
         delaySpy.mockRestore();
         delete global.requestViaTab;
-        delete global.RateLimitClient;
+        delete global.globalRateLimiter;
+    });
+
+    it('Warns when no globalRateLimiter is found and proceeds with local delay', async () => {
+        const svc = new BaseService({ name: 'TestService', baseUrl: 'https://test.com' });
+        const response429 = { ok: false, status: 429, text: '', retryAfter: '1' };
+        const responseOk = { ok: true, status: 200, text: '' };
+        const requestViaTabMock = vi.fn()
+            .mockResolvedValueOnce(response429)
+            .mockResolvedValueOnce(responseOk);
+        global.requestViaTab = requestViaTabMock;
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const delaySpy = vi.spyOn(svc, 'delay').mockResolvedValue();
+        delete global.globalRateLimiter;
+        delete global.self;
+        const result = await svc.fetchWithRateLimitRetry('url', {}, 2);
+        expect(result.status).toBe(200);
+        expect(warnSpy).toHaveBeenCalledWith('[TestService] No globalRateLimiter found, proceeding with local delay.');
+        warnSpy.mockRestore();
+        delaySpy.mockRestore();
+        delete global.requestViaTab;
+    });
+
+    it('Uses self globalRateLimiter throttle when global is missing but self is present', async () => {
+        const svc = new BaseService({ name: 'TestService', baseUrl: 'https://test.com' });
+        const response429 = { ok: false, status: 429, text: '', retryAfter: '1' };
+        const responseOk = { ok: true, status: 200, text: '' };
+        const requestViaTabMock = vi.fn()
+            .mockResolvedValueOnce(response429)
+            .mockResolvedValueOnce(responseOk);
+        global.requestViaTab = requestViaTabMock;
+        delete global.globalRateLimiter;
+        global.self = { globalRateLimiter: { throttle: vi.fn() } };
+        const delaySpy = vi.spyOn(svc, 'delay').mockResolvedValue();
+        const result = await svc.fetchWithRateLimitRetry('url', {}, 2);
+        expect(result.status).toBe(200);
+        expect(global.self.globalRateLimiter.throttle).toHaveBeenCalledWith(1000);
+        delaySpy.mockRestore();
+        delete global.requestViaTab;
+        delete global.self;
     });
 
     it('Uses default waitMs 30000 when Retry-After header is missing or invalid', async () => {
@@ -180,13 +230,13 @@ describe('BaseService', () => {
             .mockResolvedValueOnce(responseOk);
         global.requestViaTab = requestViaTabMock;
         const delaySpy = vi.spyOn(svc, 'delay').mockResolvedValue();
-        global.RateLimitClient = { throttle: vi.fn() };
+        global.globalRateLimiter = { throttle: vi.fn() };
         const result = await svc.fetchWithRateLimitRetry('url', {}, 2);
         expect(result.status).toBe(200);
         expect(delaySpy).toHaveBeenCalledWith(30000);
         delaySpy.mockRestore();
         delete global.requestViaTab;
-        delete global.RateLimitClient;
+        delete global.globalRateLimiter;
     });
 
     it('Throws error after maxRetries when always rate limited', async () => {

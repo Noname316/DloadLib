@@ -1,18 +1,10 @@
 {
-  "name": "downloadlib",
-  "version": "1.1.0",
-  "description": "Browser extension for downloading manga",
-  "homepage": "https://github.com/ivanvit100/DownloadLib#readme",
-  "bugs": {
-    "url": "https://github.com/ivanvit100/DownloadLib/issues"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/ivanvit100/DownloadLib.git"
-  },
+  "name": "dloadlib",
+  "version": "1.0.0",
+  "description": "Unofficial fork of DownloadLib (https://github.com/ivanvit100/DownloadLib): manga and ranobe downloader for MangaLib, HentaiLib, RanobeLib and com-x",
   "license": "MIT",
   "author": "ivanvit",
-  "type": "module",
+  "type": "commonjs",
   "main": "app.js",
   "directories": {
     "lib": "lib",

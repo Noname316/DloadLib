@@ -1,20 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-vi.mock('../../core/AuthManager.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('AuthManager'));
-vi.mock('../../core/BrowserApi.js', async () => (await import('../helpers/globalBridge.js'))
-    .globalBridge('extensionApi', 'browserEnv', 'fetchViaTab', 'setServiceTab'));
-vi.mock('../../core/DownloadHistory.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('DownloadHistory'));
-vi.mock('../../core/DownloadManager.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('DownloadManager'));
-vi.mock('../../core/PluginManager.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('PluginManager'));
-vi.mock('../../exporters/ExporterRegistry.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('ExporterRegistry'));
-vi.mock('../../services/mangalib/MangaLibService.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('MangaLibService'));
-vi.mock('../../services/ranobelib/RanobeLibService.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('RanobeLibService'));
-vi.mock('../../services/ServiceRegistry.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('serviceRegistry'));
-vi.mock('../../ui/ChapterController.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('ChapterController'));
-vi.mock('../../ui/HistoryController.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('HistoryController'));
-vi.mock('../../ui/SettingsController.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('SettingsController'));
-vi.mock('../../ui/TemplateLoader.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('TemplateLoader'));
-
 let PopupController;
 let RealChapterController;
 let intervals = [];
@@ -55,6 +40,10 @@ function setupDOM() {
             <div id="formatContainer">
                 <select id="formatSelector"></select>
             </div>
+            <div id="fileInputContainer">
+                <input type="file" id="fileInput">
+                <button id="customFileBtn">Загрузить файл для обновления</button>
+            </div>
             <div id="downloadInfoPanel" style="display:none;"></div>
             <button id="downloadBtn"></button>
             <div id="status"></div>
@@ -69,6 +58,7 @@ function setupDOM() {
 
 beforeEach(async () => {
     vi.resetModules();
+    delete global.getExtensionApi;
 
     intervals = [];
     if (!originalSetInterval) {
@@ -94,7 +84,7 @@ beforeEach(async () => {
     };
     global.DownloadManager = class {
         constructor() { this.eventBus = { on: vi.fn() }; }
-        startDownload = vi.fn(async () => ({ success: true, downloadId: 'id' }));
+        startDownload = vi.fn(async () => ({ updated: true, addedChapters: 1 }));
         stop = vi.fn();
         getDownloadState = vi.fn(() => ({ id: 1, status: 'active', progress: 50, slug: 'slug' }));
     };
@@ -112,7 +102,7 @@ beforeEach(async () => {
         })),
         getService: vi.fn(() => null),
     };
-    global.extensionApi = {
+    global.browser = {
         runtime: {
             sendMessage: vi.fn(async () => ({ ok: true, downloads: [{ slug: 'slug', status: 'active', progress: 50 }] })),
             getURL: vi.fn(() => 'popup.html')
@@ -139,7 +129,8 @@ beforeEach(async () => {
 
     global.DownloadHistory = { add: vi.fn(), getAll: vi.fn(() => []), clear: vi.fn() };
     global.AuthManager = { getToken: vi.fn(async () => null), apply: vi.fn(async () => null) };
-    ({ ChapterController: RealChapterController } = await vi.importActual('../../ui/ChapterController.js'));
+    await import('../../ui/ChapterController.js');
+    RealChapterController = global.ChapterController;
     global.ChapterController = class extends RealChapterController {
         constructor() {
             super();
@@ -152,11 +143,10 @@ beforeEach(async () => {
         current: vi.fn(() => null)
     };
     global.HistoryController = { init: vi.fn() };
-    global.browserEnv = { isFirefox: true };
-    global.PluginManager = { loadAll: vi.fn(async () => {}) };
-    global.SettingsController = { init: vi.fn() };
 
-    ({ PopupController } = await import('../../ui/PopupController.js'));
+    await import('../../core/MangaPatcher.js');
+    await import('../../ui/PopupController.js');
+    PopupController = global.PopupController;
 });
 
 afterEach(() => {
@@ -189,42 +179,29 @@ describe('PopupController second test file', () => {
         expect(resetUISpy).toHaveBeenCalled();
     });
 
-    it('Shows the default rate limit of 85 and leaves the limit to the background', async () => {
+    it('Uses default rate limit of 85 when localStorage has no saved value', async () => {
         const controller = new PopupController();
         controller.currentSlug = 'slug';
         controller.currentServiceKey = 'ranobelib';
-        const sendMessageSpy = vi.spyOn(global.extensionApi.runtime, 'sendMessage');
+        const sendMessageSpy = vi.spyOn(global.browser.runtime, 'sendMessage');
 
         await controller.startDownload();
 
-        expect(document.getElementById('downloadInfoPanel').textContent).toContain('Запросов в минуту85');
-        expect(sendMessageSpy).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'setRateLimit' }));
+        expect(sendMessageSpy).toHaveBeenCalledWith(expect.objectContaining({ action: 'setRateLimit', limit: 85 }));
     });
 
-    it('Shows the rate limit saved by an older version in localStorage', async () => {
+    it('Uses saved rate limit from localStorage when available', async () => {
         global.localStorage.getItem = vi.fn(key =>
             key === 'downloadlib_default_rate_limit' ? '120' : null
         );
         const controller = new PopupController();
         controller.currentSlug = 'slug';
         controller.currentServiceKey = 'ranobelib';
+        const sendMessageSpy = vi.spyOn(global.browser.runtime, 'sendMessage');
 
         await controller.startDownload();
 
-        expect(document.getElementById('downloadInfoPanel').textContent).toContain('Запросов в минуту120');
-    });
-
-    it('Shows the rate limit from the settings in storage.local', async () => {
-        global.extensionApi.storage = {
-            local: { get: vi.fn(async () => ({ downloadlib_default_rate_limit: 40 })), set: vi.fn(async () => {}) }
-        };
-        const controller = new PopupController();
-        controller.currentSlug = 'slug';
-        controller.currentServiceKey = 'ranobelib';
-
-        await controller.startDownload();
-
-        expect(document.getElementById('downloadInfoPanel').textContent).toContain('Запросов в минуту40');
+        expect(sendMessageSpy).toHaveBeenCalledWith(expect.objectContaining({ action: 'setRateLimit', limit: 120 }));
     });
 
     it('Completes without spurious warnings when all optional elements are missing during download start', async () => {
@@ -237,11 +214,11 @@ describe('PopupController second test file', () => {
 
         global.DownloadManager = class {
             constructor() { this.eventBus = { on: vi.fn() }; }
-            startDownload = vi.fn(async () => ({ success: true, downloadId: 'id' }));
+            startDownload = vi.fn(async () => ({ updated: true, addedChapters: 1 }));
             stop = vi.fn();
             getDownloadState = vi.fn(() => null);
         };
-        global.extensionApi.runtime.sendMessage = vi.fn(async () => ({ ok: true, downloads: [] }));
+        global.browser.runtime.sendMessage = vi.fn(async () => ({ ok: true, downloads: [] }));
 
         const warnSpy = vi.spyOn(console, 'warn');
 
@@ -256,9 +233,12 @@ describe('PopupController second test file', () => {
         await controller.startDownload();
 
         expect(warnSpy).not.toHaveBeenCalled();
+        expect(global.browser.runtime.sendMessage).toHaveBeenCalledWith(
+            expect.objectContaining({ action: 'setRateLimit', limit: 85 })
+        );
     });
 
-    it('Sets download start status text', async () => {
+    it('Sets update status text when loaded file is present', async () => {
         const controller = new PopupController();
         controller.currentSlug = 'slug';
         controller.currentServiceKey = 'ranobelib';
@@ -266,6 +246,7 @@ describe('PopupController second test file', () => {
         await new Promise(resolve => setTimeout(resolve, 100));
 
         controller.downloadManager.startDownload = vi.fn(async () => ({}));
+        controller.loadedFile = { name: 'test.fb2' };
 
         const setTextSpy = vi.fn();
         const status = document.getElementById('status');
@@ -277,7 +258,7 @@ describe('PopupController second test file', () => {
 
         await controller.startDownload();
 
-        expect(setTextSpy).toHaveBeenCalledWith('Запуск скачивания...');
+        expect(setTextSpy).toHaveBeenCalledWith('Запуск обновления...');
     });
 
     it('Completes without error when status element is missing during download start', async () => {
@@ -336,6 +317,28 @@ describe('PopupController second test file', () => {
         expect(controller.isPaused).toBe(false);
     });
 
+    it('Sets status text to file is already up to date', async () => {
+        const controller = new PopupController();
+        controller.currentSlug = 'slug';
+        controller.currentServiceKey = 'ranobelib';
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        controller.downloadManager.startDownload = vi.fn(async () => ({
+            updated: false,
+            addedChapters: 0
+        }));
+
+        const status = document.getElementById('status');
+        status.textContent = '';
+
+        controller.loadedFile = { name: 'test.fb2' };
+
+        await controller.startDownload();
+
+        expect(status.textContent).toBe('Файл уже актуален!');
+    });
+
     it('Handles error in download and calls error display and UI reset', async () => {
         const controller = new PopupController();
         controller.currentSlug = 'slug';
@@ -356,6 +359,28 @@ describe('PopupController second test file', () => {
         expect(errorSpy).toHaveBeenCalledWith('[PopupController] Download failed:', expect.any(Error));
         expect(showErrorSpy).toHaveBeenCalledWith('Download failed test');
         expect(resetUISpy).toHaveBeenCalled();
+    });
+
+    it('Warns when status element is missing for download result message', async () => {
+        const controller = new PopupController();
+        controller.currentSlug = 'slug';
+        controller.currentServiceKey = 'ranobelib';
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        controller.downloadManager.startDownload = vi.fn(async () => ({
+            updated: true,
+            addedChapters: 5
+        }));
+
+        const status = document.getElementById('status');
+        if (status) status.parentNode.removeChild(status);
+
+        const warnSpy = vi.spyOn(console, 'warn');
+
+        await controller.startDownload();
+
+        expect(warnSpy).toHaveBeenCalledWith('Status element not found when showing download result message');
     });
 
     it('Warns when status element is missing on download stop', async () => {
@@ -418,6 +443,30 @@ describe('PopupController second test file', () => {
         expect(() => controller.resetUI()).not.toThrow();
     });
 
+    it('Warns when hidden file input is missing during UI reset', async () => {
+        const controller = new PopupController();
+
+        const el = document.getElementById('fileInput');
+        if (el) el.parentNode.removeChild(el);
+
+        const warnSpy = vi.spyOn(console, 'warn');
+        controller.resetUI();
+
+        expect(warnSpy).toHaveBeenCalledWith('Hidden file input not found when resetting UI');
+    });
+
+    it('Warns when custom file button is missing during UI reset', async () => {
+        const controller = new PopupController();
+
+        const el = document.getElementById('customFileBtn');
+        if (el) el.parentNode.removeChild(el);
+
+        const warnSpy = vi.spyOn(console, 'warn');
+        controller.resetUI();
+
+        expect(warnSpy).toHaveBeenCalledWith('Custom file button not found when resetting UI');
+    });
+
     it('Warns when progress element is missing during UI reset', async () => {
         const controller = new PopupController();
 
@@ -454,6 +503,15 @@ describe('PopupController second test file', () => {
         expect(warnSpy).toHaveBeenCalledWith('Chapter range container not found when resetting UI');
     });
 
+    it('Completes without error when fileInputContainer is missing during UI reset', async () => {
+        const controller = new PopupController();
+
+        const el = document.getElementById('fileInputContainer');
+        if (el) el.parentNode.removeChild(el);
+
+        expect(() => controller.resetUI()).not.toThrow();
+    });
+
     it('Warns when error element is missing during error display', async () => {
         const controller = new PopupController();
 
@@ -485,6 +543,7 @@ describe('PopupController second test file', () => {
         controller.currentSlug = 'slug';
         controller.currentServiceKey = 'ranobelib';
         controller.isInSeparateWindow = vi.fn(async () => false);
+        controller.loadedFile = null;
 
         await new Promise(resolve => setTimeout(resolve, 100));
 
@@ -568,20 +627,20 @@ describe('PopupController second test file', () => {
 
     it('openInNewContext uses tabs.create when windows API is unavailable and tab is returned', async () => {
         const controller = new PopupController();
-        delete global.extensionApi.windows;
-        global.extensionApi.tabs = { create: vi.fn(async () => ({ id: 5, active: true })) };
+        delete global.browser.windows;
+        global.browser.tabs = { create: vi.fn(async () => ({ id: 5, active: true })) };
 
         const warnSpy = vi.spyOn(console, 'warn');
         await controller.openInNewContext('popup.html?test=1');
 
-        expect(global.extensionApi.tabs.create).toHaveBeenCalledWith({ url: 'popup.html?test=1', active: true });
+        expect(global.browser.tabs.create).toHaveBeenCalledWith({ url: 'popup.html?test=1', active: true });
         expect(warnSpy).not.toHaveBeenCalledWith('Tab created but no ID found:', expect.anything());
     });
 
     it('openInNewContext warns when tabs.create returns null', async () => {
         const controller = new PopupController();
-        delete global.extensionApi.windows;
-        global.extensionApi.tabs = { create: vi.fn(async () => null) };
+        delete global.browser.windows;
+        global.browser.tabs = { create: vi.fn(async () => null) };
 
         const warnSpy = vi.spyOn(console, 'warn');
         await controller.openInNewContext('popup.html?test=1');
@@ -591,8 +650,8 @@ describe('PopupController second test file', () => {
 
     it('openInNewContext logs error when neither windows nor tabs API is available', async () => {
         const controller = new PopupController();
-        delete global.extensionApi.windows;
-        delete global.extensionApi.tabs;
+        delete global.browser.windows;
+        delete global.browser.tabs;
 
         const errorSpy = vi.spyOn(console, 'error');
         await controller.openInNewContext('popup.html?test=1');
@@ -600,23 +659,27 @@ describe('PopupController second test file', () => {
         expect(errorSpy).toHaveBeenCalledWith('No window/tab API available');
     });
 
-    it('openInNewContext opens a popup window when browserEnv.isFirefox is true', async () => {
+    it('openInNewContext uses getBrowserEnv().isFirefox when getBrowserEnv is defined (Firefox)', async () => {
         const controller = new PopupController();
-        global.browserEnv = { isFirefox: true };
+        global.getBrowserEnv = vi.fn(() => ({ isFirefox: true }));
 
         await controller.openInNewContext('popup.html?test=1');
 
-        expect(global.extensionApi.windows.create).toHaveBeenCalledWith(expect.objectContaining({ url: 'popup.html?test=1' }));
+        expect(global.getBrowserEnv).toHaveBeenCalled();
+        expect(global.browser.windows.create).toHaveBeenCalledWith(expect.objectContaining({ url: 'popup.html?test=1' }));
+        delete global.getBrowserEnv;
     });
 
-    it('openInNewContext asks the background when browserEnv.isFirefox is false', async () => {
+    it('openInNewContext uses getBrowserEnv().isFirefox when getBrowserEnv is defined (Chrome)', async () => {
         const controller = new PopupController();
-        global.browserEnv = { isFirefox: false };
+        global.getBrowserEnv = vi.fn(() => ({ isFirefox: false }));
 
         await controller.openInNewContext('popup.html?test=1');
 
-        expect(global.extensionApi.runtime.sendMessage).toHaveBeenCalledWith({ action: 'openWindowWithUrl', url: 'popup.html?test=1' });
-        expect(global.extensionApi.windows.create).not.toHaveBeenCalled();
+        expect(global.getBrowserEnv).toHaveBeenCalled();
+        expect(global.browser.runtime.sendMessage).toHaveBeenCalledWith({ action: 'openWindowWithUrl', url: 'popup.html?test=1' });
+        expect(global.browser.windows.create).not.toHaveBeenCalled();
+        delete global.getBrowserEnv;
     });
 
     it('_setupTranslatorSelector returns null when translatorContainer is missing from DOM', () => {
@@ -753,6 +816,7 @@ describe('PopupController second test file', () => {
     it('Appends branchId to URL params when translatorContainer is visible during download button click', async () => {
         const controller = new PopupController();
         controller.isInSeparateWindow = vi.fn().mockResolvedValue(false);
+        controller.loadedFile = null;
 
         await new Promise(resolve => setTimeout(resolve, 100));
 
@@ -764,7 +828,7 @@ describe('PopupController second test file', () => {
         ts.appendChild(opt);
         ts.value = '42';
 
-        const windowsCreateSpy = vi.spyOn(global.extensionApi.windows, 'create').mockResolvedValue({ id: 123 });
+        const windowsCreateSpy = vi.spyOn(global.browser.windows, 'create').mockResolvedValue({ id: 123 });
 
         document.getElementById('downloadBtn').click();
 

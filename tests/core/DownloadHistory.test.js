@@ -5,7 +5,9 @@ let DownloadHistory;
 beforeEach(async () => {
     vi.resetModules();
     localStorage.clear();
-    ({ DownloadHistory } = await import('../../core/DownloadHistory.js'));
+    await import('../../core/Storage.js');
+    await import('../../core/DownloadHistory.js');
+    DownloadHistory = (typeof window !== 'undefined' ? window : global).DownloadHistory;
 });
 
 describe('DownloadHistory', () => {

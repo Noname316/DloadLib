@@ -1,5 +1,4 @@
 import { describe, it, beforeEach, afterEach, expect, vi } from 'vitest';
-import { MSG } from '../../core/messages.js';
 
 describe('DownloadButton', () => {
     beforeEach(async () => {
@@ -164,7 +163,7 @@ describe('DownloadButton', () => {
         await Promise.resolve();
     });
 
-    it('Click handler sends the openDownloadWindow message the background router handles', async () => {
+    it('Click handler sends openDownloadWindow message via runtime API', async () => {
         vi.resetModules();
 
         document.body.innerHTML = `
@@ -196,7 +195,7 @@ describe('DownloadButton', () => {
         expect(btn).not.toBeNull();
         btn.click();
 
-        expect(sendMessageMock).toHaveBeenCalledWith({ action: MSG.OPEN_DOWNLOAD_WINDOW, format: 'pdf' });
+        expect(sendMessageMock).toHaveBeenCalledWith({ action: 'openDownloadWindow', format: 'pdf' });
     });
 
     it('Click handler uses fb2 fallback when format label text is empty', async () => {
@@ -228,7 +227,7 @@ describe('DownloadButton', () => {
         expect(btn).not.toBeNull();
         btn.click();
 
-        expect(sendMessageMock).toHaveBeenCalledWith({ action: MSG.OPEN_DOWNLOAD_WINDOW, format: 'fb2' });
+        expect(sendMessageMock).toHaveBeenCalledWith({ action: 'openDownloadWindow', format: 'fb2' });
     });
 
     it('Click handler returns early when no browser API is available', async () => {

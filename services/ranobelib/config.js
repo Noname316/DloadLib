@@ -1,40 +1,47 @@
-export const ranobelibConfig = {
-    name: 'ranobelib',
-    baseUrl: 'https://api.cdnlibs.org',
-    imagesDomain: 'https://cover.imglib.info',
-    siteId: '3',
+'use strict';
 
-    fields: [
-        'background', 'eng_name', 'otherNames', 'summary', 'releaseDate', 'type_id',
-        'caution', 'views', 'close_view', 'rate_avg', 'rate', 'genres',
-        'tags', 'teams', 'user', 'franchise', 'authors', 'publisher',
-        'userRating', 'moderated', 'metadata', 'metadata.count',
-        'metadata.close_comments', 'manga_status_id', 'chap_count',
-        'status_id', 'artists', 'format'
-    ],
+(function(global) {
+    global.ranolibConfig = {
+        name: 'ranobelib',
+        baseUrl: 'https://api.cdnlibs.org',
+        imagesDomain: 'https://cover.imglib.info',
+        siteId: '3',
 
-    headers: {
-        'Accept': '*/*',
-        'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
-        'Site-Id': '3',
-        'X-DL-Service': 'ranobelib',
-        'Content-Type': 'application/json',
-        'Client-Time-Zone': 'Europe/Moscow'
-    },
+        fields: [
+            'background', 'eng_name', 'otherNames', 'summary', 'releaseDate', 'type_id',
+            'caution', 'views', 'close_view', 'rate_avg', 'rate', 'genres',
+            'tags', 'teams', 'user', 'franchise', 'authors', 'publisher',
+            'userRating', 'moderated', 'metadata', 'metadata.count',
+            'metadata.close_comments', 'manga_status_id', 'chap_count',
+            'status_id', 'artists', 'format'
+        ],
 
-    imageHeaders: {
-        'Accept': 'image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5',
-        'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8'
-    },
+        headers: {
+            'Accept': '*/*',
+            'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
+            'Site-Id': '3',
+            'X-DL-Service': 'ranobelib',
+            'Content-Type': 'application/json',
+            'Client-Time-Zone': 'Europe/Moscow'
+        },
 
-    hosts: ['ranobelib.me'],
-    imageHosts: ['imglib.info'],
-    titleUrl: 'https://ranobelib.me/ru/book/{slug}',
-    adBlock: ['|https://yandex.ru/'],
+        imageHeaders: {
+            'Accept': 'image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5',
+            'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8'
+        },
 
-    label: 'RanobeLib',
-    siteUrl: 'https://ranobelib.me',
-    primaryColor: '#2196f3',
-    secondaryColor: '#1f82d3',
-    logo: 'icons/logo3.png'
-};
+        // Доступные форматы сохранения; первый — формат по умолчанию.
+        formats: ['fb2', 'epub'],
+        // Ранобэ — в основном текст: весь выбранный диапазон сохраняется одним файлом
+        // (без деления на тома и части по размеру).
+        singleFile: true,
+        // Перед загрузкой выбирается папка сохранения (как у MangaLib).
+        chooseSaveFolder: true,
+
+        label: 'RanobeLib',
+        siteUrl: 'https://ranobelib.me',
+        primaryColor: '#2196f3',
+        secondaryColor: '#1f82d3',
+        logo: 'icons/logo3.png'
+    };
+})(typeof window !== 'undefined' ? window : self);

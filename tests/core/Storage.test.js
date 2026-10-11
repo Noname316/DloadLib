@@ -4,7 +4,8 @@ let StorageClass;
 
 beforeEach(async () => {
     vi.resetModules();
-    ({ SafeStorage: StorageClass } = await import('../../core/Storage.js'));
+    await import('../../core/Storage.js');
+    StorageClass = (typeof window !== 'undefined' ? window : global).Storage;
 });
 
 afterEach(() => {

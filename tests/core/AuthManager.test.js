@@ -7,12 +7,18 @@ let mockScripting;
 beforeEach(async () => {
     vi.resetModules();
 
+    delete global.getExtensionApi;
+    if (typeof window !== 'undefined') delete window.getExtensionApi;
+
     mockRuntime = { sendMessage: vi.fn() };
     mockScripting = { executeScript: vi.fn() };
 
-    global.browser = { runtime: mockRuntime, scripting: mockScripting };
+    const browserMock = { runtime: mockRuntime, scripting: mockScripting };
+    global.browser = browserMock;
+    if (typeof window !== 'undefined') window.browser = browserMock;
 
-    ({ AuthManager } = await import('../../core/AuthManager.js'));
+    await import('../../core/AuthManager.js');
+    AuthManager = (typeof window !== 'undefined' ? window : global).AuthManager;
 });
 
 describe('AuthManager.getToken', () => {
@@ -75,10 +81,27 @@ describe('AuthManager.getToken', () => {
 
     it('skips executeScript when scripting API is absent', async () => {
         vi.resetModules();
-        global.browser = { runtime: { sendMessage: vi.fn().mockResolvedValue({ token: null }) } };
-        const { AuthManager: AM } = await import('../../core/AuthManager.js');
+        delete global.getExtensionApi;
+        if (typeof window !== 'undefined') delete window.getExtensionApi;
+        const browserMock = { runtime: { sendMessage: vi.fn().mockResolvedValue({ token: null }) } };
+        global.browser = browserMock;
+        if (typeof window !== 'undefined') window.browser = browserMock;
+        await import('../../core/AuthManager.js');
+        const AM = (typeof window !== 'undefined' ? window : global).AuthManager;
         const token = await AM.getToken('mangalib', 1);
         expect(token).toBeNull();
+    });
+
+    it('uses getExtensionApi() when it is a function', async () => {
+        vi.resetModules();
+        const host = typeof window !== 'undefined' ? window : global;
+        const mockApi = { runtime: { sendMessage: vi.fn().mockResolvedValue({ token: 'via-getter' }) } };
+        host.getExtensionApi = () => mockApi;
+        await import('../../core/AuthManager.js');
+        const AM = host.AuthManager;
+        const token = await AM.getToken('mangalib');
+        expect(token).toBe('via-getter');
+        delete host.getExtensionApi;
     });
 
     it('silently ignores cacheAuthToken sendMessage failure', async () => {
@@ -90,22 +113,29 @@ describe('AuthManager.getToken', () => {
         expect(token).toBe('extracted-jwt');
     });
 
-    it('uses the chrome API (via BrowserApi) when browser global is absent', async () => {
+    it('falls back to chrome API when browser global is absent', async () => {
         vi.resetModules();
-        delete global.browser;
-        global.chrome = { runtime: { sendMessage: vi.fn().mockResolvedValue({ token: 'chrome-token' }) } };
-        const { AuthManager: AM } = await import('../../core/AuthManager.js');
+        const host = typeof window !== 'undefined' ? window : global;
+        delete host.getExtensionApi;
+        delete host.browser;
+        const mockChrome = { runtime: { sendMessage: vi.fn().mockResolvedValue({ token: 'chrome-token' }) } };
+        host.chrome = mockChrome;
+        await import('../../core/AuthManager.js');
+        const AM = host.AuthManager;
         const token = await AM.getToken('mangalib');
         expect(token).toBe('chrome-token');
-        delete global.chrome;
+        delete host.chrome;
     });
 
     it('returns null when neither browser nor chrome are available', async () => {
         vi.resetModules();
-        delete global.browser;
-        delete global.chrome;
+        const host = typeof window !== 'undefined' ? window : global;
+        delete host.getExtensionApi;
+        delete host.browser;
+        delete host.chrome;
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        const { AuthManager: AM } = await import('../../core/AuthManager.js');
+        await import('../../core/AuthManager.js');
+        const AM = host.AuthManager;
         const token = await AM.getToken('mangalib');
         expect(token).toBeNull();
         warnSpy.mockRestore();
@@ -151,10 +181,7 @@ describe('AuthManager.apply', () => {
 });
 
 describe('AuthManager getToken — executeScript inner func (JWT extraction)', () => {
-    const base64url = value => btoa(JSON.stringify(value)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    const makeJwt = payload => `${base64url({ alg: 'HS256' })}.${base64url(payload)}.signature`;
-    const nowSeconds = () => Math.floor(Date.now() / 1000);
-    const JWT = makeJwt({ sub: '1', exp: nowSeconds() + 3600 });
+    const JWT = 'eyJhbGc.eyJzdWI.SflKxwRJ';
     let capturedFunc;
 
     beforeEach(async () => {
@@ -237,49 +264,5 @@ describe('AuthManager getToken — executeScript inner func (JWT extraction)', (
     it('finds JWT in sessionStorage when localStorage is empty', () => {
         sessionStorage.setItem('jwt', JWT);
         expect(capturedFunc()).toBe(JWT);
-    });
-
-    it('ignores an expired JWT', () => {
-        localStorage.setItem('auth', makeJwt({ sub: '1', exp: nowSeconds() - 60 }));
-        expect(capturedFunc()).toBeNull();
-    });
-
-    it('ignores a JWT that expires within the safety margin', () => {
-        localStorage.setItem('auth', makeJwt({ sub: '1', exp: nowSeconds() + 10 }));
-        expect(capturedFunc()).toBeNull();
-    });
-
-    it('ignores a JWT without exp', () => {
-        localStorage.setItem('auth', makeJwt({ sub: '1' }));
-        expect(capturedFunc()).toBeNull();
-    });
-
-    it('skips an expired JWT and returns a live one from another key', () => {
-        localStorage.setItem('auth', makeJwt({ sub: 'old', exp: nowSeconds() - 60 }));
-        localStorage.setItem('session', JWT);
-        expect(capturedFunc()).toBe(JWT);
-    });
-
-    it('prefers keys that look like a token store', () => {
-        const other = makeJwt({ sub: 'other', exp: nowSeconds() + 3600 });
-        localStorage.setItem('a-analytics', other);
-        localStorage.setItem('z-auth-token', JWT);
-        expect(capturedFunc()).toBe(JWT);
-    });
-});
-
-describe('AuthManager.invalidate', () => {
-    it('asks the background to drop the token of the service', async () => {
-        mockRuntime.sendMessage.mockResolvedValue({ ok: true });
-        await AuthManager.invalidate('mangalib');
-        expect(mockRuntime.sendMessage).toHaveBeenCalledWith({ action: 'authInvalidate', serviceKey: 'mangalib' });
-    });
-
-    it('warns instead of throwing when the background is unavailable', async () => {
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-        mockRuntime.sendMessage.mockRejectedValue(new Error('no receiver'));
-        await expect(AuthManager.invalidate('mangalib')).resolves.toBeUndefined();
-        expect(warn).toHaveBeenCalled();
-        warn.mockRestore();
     });
 });

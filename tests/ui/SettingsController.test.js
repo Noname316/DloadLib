@@ -1,8 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-vi.mock('../../core/PluginManager.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('PluginManager'));
-vi.mock('../../core/RateLimitClient.js', async () => (await import('../helpers/globalBridge.js')).globalBridge('RateLimitClient'));
-
 let SettingsController;
 
 function setupDOM() {
@@ -24,18 +21,11 @@ function setupDOM() {
 
 async function loadModule() {
     vi.resetModules();
-    globalThis.PluginManager = {
-        list: vi.fn().mockResolvedValue([]),
-        toggle: vi.fn().mockResolvedValue(),
-        remove: vi.fn().mockResolvedValue(),
-        save: vi.fn().mockResolvedValue(),
-        generateId: vi.fn(() => 'plugin_id')
-    };
-    globalThis.RateLimitClient = {
-        getLimit: vi.fn(async () => 85),
-        setLimit: vi.fn(async value => Number(value))
-    };
-    ({ SettingsController } = await import('../../ui/SettingsController.js'));
+    delete globalThis.PluginManager;
+    delete globalThis.popupController;
+    delete globalThis.globalRateLimiter;
+    await import('../../ui/SettingsController.js');
+    SettingsController = globalThis.SettingsController;
 }
 
 beforeEach(async () => {
@@ -59,22 +49,20 @@ describe('init()', () => {
 });
 
 describe('_renderRateLimit()', () => {
-    it('returns early when element absent', async () => {
+    it('returns early when element absent', () => {
         document.getElementById('settingsRateLimit').remove();
-        await expect(SettingsController._renderRateLimit()).resolves.toBeUndefined();
-        expect(globalThis.RateLimitClient.getLimit).not.toHaveBeenCalled();
+        expect(() => SettingsController._renderRateLimit()).not.toThrow();
     });
 
-    it('shows the limit from the settings', async () => {
-        globalThis.RateLimitClient.getLimit = vi.fn(async () => 50);
-        await SettingsController._renderRateLimit();
-        expect(document.getElementById('settingsRateLimit').value).toBe('50');
-    });
-
-    it('does not read the limit from localStorage directly', async () => {
-        localStorage.setItem('downloadlib_default_rate_limit', '50');
-        await SettingsController._renderRateLimit();
+    it('uses default 85 when localStorage empty', () => {
+        SettingsController._renderRateLimit();
         expect(document.getElementById('settingsRateLimit').value).toBe('85');
+    });
+
+    it('uses stored value from localStorage', () => {
+        localStorage.setItem('downloadlib_default_rate_limit', '50');
+        SettingsController._renderRateLimit();
+        expect(document.getElementById('settingsRateLimit').value).toBe('50');
     });
 });
 
@@ -140,6 +128,20 @@ describe('_renderPlugins()', () => {
         await expect(SettingsController._renderPlugins()).resolves.toBeUndefined();
     });
 
+    it('shows unavailable message when PluginManager absent (with empty el)', async () => {
+        delete globalThis.PluginManager;
+        await SettingsController._renderPlugins();
+        const empty = document.getElementById('pluginEmpty');
+        expect(empty.textContent).toBe('PluginManager недоступен');
+        expect(empty.style.display).toBe('block');
+    });
+
+    it('no error when PluginManager absent and empty el absent', async () => {
+        delete globalThis.PluginManager;
+        document.getElementById('pluginEmpty').remove();
+        await expect(SettingsController._renderPlugins()).resolves.toBeUndefined();
+    });
+
     it('shows empty block when plugins list is empty (with empty el)', async () => {
         globalThis.PluginManager = { list: vi.fn().mockResolvedValue([]) };
         await SettingsController._renderPlugins();
@@ -190,7 +192,7 @@ describe('_createPluginCard()', () => {
         expect(card.querySelector('.plugin-toggle').checked).toBe(false);
     });
 
-    it('toggle change calls PluginManager.toggle', async () => {
+    it('toggle change calls PluginManager.toggle when PluginManager present', async () => {
         globalThis.PluginManager = { toggle: vi.fn().mockResolvedValue() };
         const card = SettingsController._createPluginCard({ id: 'x', name: 'P', enabled: true });
         const toggle = card.querySelector('.plugin-toggle');
@@ -200,7 +202,15 @@ describe('_createPluginCard()', () => {
         expect(globalThis.PluginManager.toggle).toHaveBeenCalledWith('x', false);
     });
 
-    it('remove button calls remove and re-renders', async () => {
+    it('toggle change is no-op when PluginManager absent', async () => {
+        delete globalThis.PluginManager;
+        const card = SettingsController._createPluginCard({ id: 'x', name: 'P', enabled: true });
+        const toggle = card.querySelector('.plugin-toggle');
+        toggle.dispatchEvent(new Event('change'));
+        await Promise.resolve();
+    });
+
+    it('remove button calls remove and re-renders when PluginManager present', async () => {
         globalThis.PluginManager = {
             remove: vi.fn().mockResolvedValue(),
             list: vi.fn().mockResolvedValue([])
@@ -211,6 +221,13 @@ describe('_createPluginCard()', () => {
         await Promise.resolve(); await Promise.resolve();
         expect(globalThis.PluginManager.remove).toHaveBeenCalledWith('x');
         expect(SettingsController._renderPlugins).toHaveBeenCalled();
+    });
+
+    it('remove button is no-op when PluginManager absent', async () => {
+        delete globalThis.PluginManager;
+        const card = SettingsController._createPluginCard({ id: 'x', name: 'P', enabled: true });
+        card.querySelector('.plugin-remove-btn').click();
+        await Promise.resolve();
     });
 });
 
@@ -232,47 +249,51 @@ describe('_bindEvents() backBtn', () => {
         expect(closeSpy).toHaveBeenCalled();
     });
 
-    it('clears logoInfo and calls onBack', () => {
+    it('calls popupController._restoreMainView() when present', () => {
         Object.defineProperty(window, 'location', {
             value: { search: '' },
             writable: true,
             configurable: true
         });
-        const onBack = vi.fn();
-        document.getElementById('logoInfo').textContent = 'info';
-        SettingsController._bindEvents(onBack);
+        const restore = vi.fn();
+        globalThis.popupController = { _restoreMainView: restore };
+        SettingsController._bindEvents();
         document.getElementById('settingsBackBtn').click();
-        expect(onBack).toHaveBeenCalled();
+        expect(restore).toHaveBeenCalled();
         expect(document.getElementById('logoInfo').textContent).toBe('');
     });
 
-    it('init passes onBack to the back button', () => {
-        Object.defineProperty(window, 'location', { value: { search: '' }, writable: true, configurable: true });
-        const onBack = vi.fn();
-        SettingsController.init(onBack);
-        document.getElementById('settingsBackBtn').click();
-        expect(onBack).toHaveBeenCalled();
-    });
-
-    it('logs error when onBack is not provided', () => {
+    it('logs error when popupController absent', () => {
         Object.defineProperty(window, 'location', {
             value: { search: '' },
             writable: true,
             configurable: true
         });
+        delete globalThis.popupController;
         const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
         SettingsController._bindEvents();
         document.getElementById('settingsBackBtn').click();
-        expect(errorSpy).toHaveBeenCalledWith('[SettingsController] onBack callback not provided');
+        expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('popupController not found'));
     });
 
-    it('no error when backBtn present but logoInfo absent', () => {
+    it('no error when backBtn present but logoInfo absent (popupController present)', () => {
         Object.defineProperty(window, 'location', { value: { search: '' }, writable: true, configurable: true });
         document.getElementById('logoInfo').remove();
-        const onBack = vi.fn();
-        SettingsController._bindEvents(onBack);
+        globalThis.popupController = { _restoreMainView: vi.fn() };
+        SettingsController._bindEvents();
         expect(() => document.getElementById('settingsBackBtn').click()).not.toThrow();
-        expect(onBack).toHaveBeenCalled();
+    });
+
+    it('logoInfo cleared even when logoInfo el absent', () => {
+        Object.defineProperty(window, 'location', {
+            value: { search: '' },
+            writable: true,
+            configurable: true
+        });
+        document.getElementById('logoInfo').remove();
+        globalThis.popupController = { _restoreMainView: vi.fn() };
+        SettingsController._bindEvents();
+        expect(() => document.getElementById('settingsBackBtn').click()).not.toThrow();
     });
 });
 
@@ -288,7 +309,7 @@ describe('_bindEvents() saveRateLimitBtn', () => {
         input.value = 'abc';
         document.getElementById('saveRateLimitBtn').click();
         expect(input.value).toBe('2');
-        expect(globalThis.RateLimitClient.setLimit).toHaveBeenCalledWith(2);
+        expect(localStorage.getItem('downloadlib_default_rate_limit')).toBe('2');
     });
 
     it('clamps val to 2 when below 2', () => {
@@ -305,12 +326,21 @@ describe('_bindEvents() saveRateLimitBtn', () => {
         expect(document.getElementById('settingsRateLimit').value).toBe('200');
     });
 
-    it('saves a valid value to the settings, not to localStorage', () => {
+    it('saves valid val and calls globalRateLimiter.setLimit when present', () => {
+        globalThis.globalRateLimiter = { setLimit: vi.fn() };
         SettingsController._bindEvents();
         document.getElementById('settingsRateLimit').value = '50';
         document.getElementById('saveRateLimitBtn').click();
-        expect(globalThis.RateLimitClient.setLimit).toHaveBeenCalledWith(50);
-        expect(localStorage.getItem('downloadlib_default_rate_limit')).toBeNull();
+        expect(localStorage.getItem('downloadlib_default_rate_limit')).toBe('50');
+        expect(globalThis.globalRateLimiter.setLimit).toHaveBeenCalledWith(50);
+    });
+
+    it('saves valid val without calling setLimit when globalRateLimiter absent', () => {
+        delete globalThis.globalRateLimiter;
+        SettingsController._bindEvents();
+        document.getElementById('settingsRateLimit').value = '75';
+        document.getElementById('saveRateLimitBtn').click();
+        expect(localStorage.getItem('downloadlib_default_rate_limit')).toBe('75');
     });
 
     it('saveBtn shows confirmation then restores after timeout', () => {
@@ -424,6 +454,18 @@ describe('_bindEvents() fileInput', () => {
         fileInput.dispatchEvent(new Event('change'));
         await Promise.resolve();
         expect(globalThis.PluginManager.save).not.toHaveBeenCalled();
+    });
+
+    it('returns early when PluginManager absent', async () => {
+        delete globalThis.PluginManager;
+        SettingsController._bindEvents();
+        const fileInput = document.getElementById('pluginFileInput');
+        Object.defineProperty(fileInput, 'files', {
+            value: [new File(['code'], 'plugin.js', { type: 'text/javascript' })],
+            configurable: true
+        });
+        fileInput.dispatchEvent(new Event('change'));
+        await Promise.resolve();
     });
 
     it('saves plugin from file and re-renders', async () => {

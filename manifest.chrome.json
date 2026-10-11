@@ -1,25 +1,19 @@
 {
     "manifest_version": 3,
-    "name": "DownloadLib",
-    "version": "1.1.0",
-    "description": "Скачивает мангу с порталов MangaLib в удобном для чтения формате.",
-    "author": "https://ivanvit.ru",
-    "homepage_url": "https://github.com/ivanvit100/DownloadLib",
-
+    "name": "DloadLIB",
+    "version": "1.0.0",
+    "description": "Неофициальный форк DownloadLib (ivanvit100). Скачивает мангу и ранобэ с MangaLib, HentaiLib, RanobeLib и com-x.",
     "background": {
-        "service_worker": "background/service-worker.js",
-        "type": "module"
+        "service_worker": "background/service-worker.js"
     },
-
     "action": {
-        "default_popup": "popup.html",
+        "default_title": "DloadLIB — скачать тайтл",
         "default_icon": {
             "16": "icons/icon16.png",
             "48": "icons/icon48.png",
             "128": "icons/icon128.png"
         }
     },
-
     "permissions": [
         "activeTab",
         "tabs",
@@ -30,28 +24,86 @@
         "declarativeNetRequest",
         "declarativeNetRequestWithHostAccess"
     ],
-
     "host_permissions": [
+        "https://mangalib.me/*",
+        "https://mangalib.org/*",
+        "https://ranobelib.me/*",
+        "https://api.cdnlibs.org/*",
+        "https://cover.cdnlibs.org/*",
+        "https://img3.mixlib.me/*",
+        "https://img2.imgslib.link/*",
+        "https://cover.imglib.info/*",
+        "https://com-x.life/*",
+        "https://*.com-x.life/*",
+        "https://hentailib.me/*",
+        "https://*.hentaicdn.org/*",
         "https://*/*"
     ],
-
+    "declarative_net_request": {
+        "rule_resources": [
+            {
+                "id": "manga_headers",
+                "enabled": true,
+                "path": "rules.chrome.json"
+            }
+        ]
+    },
     "content_security_policy": {
         "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'",
         "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-eval' 'unsafe-inline'; child-src 'self';"
     },
-
     "icons": {
         "16": "icons/icon16.png",
         "48": "icons/icon48.png",
         "128": "icons/icon128.png"
     },
-
+    "content_scripts": [
+        {
+            "matches": [
+                "https://mangalib.me/*",
+                "https://mangalib.org/*",
+                "https://ranobelib.me/*"
+            ],
+            "js": [
+                "content/AdCleaner.js",
+                "content/DownloadButton.js",
+                "content/ImageFetcher.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://com-x.life/*"
+            ],
+            "js": [
+                "content/DownloadButton.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://hentailib.me/*"
+            ],
+            "js": [
+                "content/DownloadButton.js",
+                "content/ImageFetcher.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ],
     "sandbox": {
-        "pages": ["sandbox.html"]
+        "pages": [
+            "sandbox.html"
+        ]
     },
-
-    "web_accessible_resources": [{
-        "resources": ["lib/kf8.wasm"],
-        "matches": ["<all_urls>"]
-    }]
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "lib/kf8.wasm"
+            ],
+            "matches": [
+                "<all_urls>"
+            ]
+        }
+    ]
 }

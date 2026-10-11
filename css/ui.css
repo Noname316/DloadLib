@@ -1,7 +1,14 @@
 body {
     padding: 15px;
     font-family: Arial, sans-serif;
-    background-color: #252527;
+    /* Цвета темы: значения по умолчанию (MangaLib); сервис может переопределить их
+       (PopupController._applyServiceTheme), например под тёмную тему com-x.life. */
+    --bg-color: #252527;
+    --panel-color: #2e2e30;
+    --panel-dark: #1d1d1f;
+    --on-primary: #fff;
+    --text-color: #fff;
+    background-color: var(--bg-color);
     --primary-color: #ff9100;
     --secondary-color: #c77101;
 }
@@ -13,7 +20,7 @@ button {
     width: 100%;
     padding: 10px;
     background: var(--primary-color);
-    color: white;
+    color: var(--on-primary);
     border: none;
     border-radius: 4px;
     cursor: pointer;
@@ -24,6 +31,7 @@ button:hover {
 }
 button:disabled {
     background: #939393;
+    color: #fff;
     cursor: not-allowed;
 }
 label {
@@ -67,7 +75,7 @@ label {
     margin-left: 8px;
     margin-right: 8px;
     text-align: center;
-    background: #252527;
+    background: var(--bg-color);
     color: #fff;
     border: 1px solid #444;
     border-radius: 4px;
@@ -95,7 +103,7 @@ input[type="number"] {
     margin-left: 8px;
     margin-right: 8px;
     text-align: center;
-    background: #252527;
+    background: var(--bg-color);
     color: #fff;
     border: 1px solid #444;
     border-radius: 4px;
@@ -114,7 +122,7 @@ input[type="number"] {
     margin-left: 8px;
     margin-right: 8px;
     text-align: center;
-    background: #252527;
+    background: var(--bg-color);
     color: #fff;
     border: 1px solid #444;
     border-radius: 4px;
@@ -152,7 +160,7 @@ input[type="number"] {
     margin-left: 8px;
     margin-right: 8px;
     text-align: center;
-    background: #252527;
+    background: var(--bg-color);
     color: #fff;
     border: 1px solid #444;
     border-radius: 4px;
@@ -163,6 +171,160 @@ input[type="number"] {
     outline: none;
     border-color: var(--primary-color);
     box-shadow: 0 0 5px var(--primary-color);
+}
+#sourceModeContainer, #saveFolderContainer {
+    text-align: center;
+    margin-top: 10px;
+    margin-bottom: 10px;
+}
+#sourceModeSelect, #saveSubfolderInput {
+    padding: 6px;
+    font-size: 13px;
+    margin-left: 6px;
+    background: var(--bg-color);
+    color: #fff;
+    border: 1px solid #444;
+    border-radius: 4px;
+}
+#saveSubfolderInput {
+    display: block;
+    width: calc(100% - 14px);
+    margin: 6px 0 0;
+}
+#sourceModeSelect:focus, #sourceModeSelect:hover,
+#saveSubfolderInput:focus, #saveSubfolderInput:hover {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 5px var(--primary-color);
+}
+#titleFolderContainer {
+    margin: 10px 0;
+    gap: 10px;
+}
+#saveFolderHint {
+    text-align: center;
+    color: #9e9e9e;
+    font-size: 12px;
+    margin-bottom: 10px;
+}
+/* Во время загрузки статус — ровно одна строка: длина текста меняется постоянно,
+   и перенос на вторую строку сдвигал бы всё, что ниже. Полный текст — во всплывающей подсказке. */
+#status.status-fixed {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #bdbdbd;
+}
+#statusDetail {
+    font-size: 12px;
+    color: #8a8a8a;
+    line-height: 1.4;
+    height: 2.8em;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    word-break: break-word;
+}
+#downloadStats {
+    margin-top: 10px;
+    padding: 6px 8px;
+    background: var(--panel-dark);
+    border: 1px solid #3a3a3d;
+    border-radius: 4px;
+    font-size: 12px;
+    color: #bdbdbd;
+}
+#downloadStats > summary {
+    cursor: pointer;
+    color: #8a8a8a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    user-select: none;
+}
+#downloadStats[open] > summary {
+    margin-bottom: 6px;
+}
+.stats-summary-title {
+    color: #bdbdbd;
+}
+#downloadStats[open] .stats-summary {
+    display: none;
+}
+.stats-summary {
+    margin-left: 4px;
+    font-variant-numeric: tabular-nums;
+}
+.stats-grid {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 2px 8px;
+    line-height: 1.4;
+}
+.stats-label {
+    color: #8a8a8a;
+    white-space: nowrap;
+}
+/* Каждое значение строго в одну строку: меняющиеся числа и появление паузы
+   не должны переносить текст и сдвигать панель. */
+.stats-value {
+    color: #e0e0e0;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+#statsLogWrap {
+    margin-top: 6px;
+}
+#statsLogWrap summary {
+    cursor: pointer;
+    color: #8a8a8a;
+}
+/* Ровно 6 строк, высота не зависит от числа записей. */
+.stats-log {
+    margin-top: 4px;
+    height: calc(1.35em * 6);
+    overflow-y: auto;
+    font-family: Consolas, 'Courier New', monospace;
+    font-size: 11px;
+    line-height: 1.35;
+}
+.stats-log-row {
+    word-break: break-word;
+}
+.stats-log-time {
+    color: #6d6d6d;
+    margin-right: 4px;
+}
+.stats-log-row.warn {
+    color: #ffb74d;
+}
+.stats-log-row.error {
+    color: #ef9a9a;
+}
+#error, #success {
+    padding: 8px 10px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.4;
+    word-wrap: break-word;
+}
+#error {
+    color: #ffcdd2;
+    background: rgba(198, 40, 40, 0.25);
+    border: 1px solid #c62828;
+}
+#success {
+    color: #c8e6c9;
+    background: rgba(46, 125, 50, 0.25);
+    border: 1px solid #2e7d32;
+}
+#error:empty, #success:empty, .hidden {
+    display: none;
 }
 #rateLimitContainer {
     text-align: center;
@@ -188,13 +350,16 @@ input[type="number"] {
     width: 100%;
     transition: all 0.3s ease;
 }
+/* Контурные кнопки: фон окна, поэтому текст светлый, а не «текст на акцентном цвете»
+   (у com-x он чёрный и на тёмном фоне не виден). */
 #pauseBtn {
     border: 2px solid var(--primary-color) !important;
-    background: #252527 !important;
+    background: var(--bg-color) !important;
+    color: var(--text-color);
 }
 #pauseBtn:hover {
     border: 2px solid var(--secondary-color) !important;
-    background: #252527 !important;
+    background: var(--bg-color) !important;
 }
 #stopBtn {
     margin-top: 12px;
@@ -209,7 +374,7 @@ input[type="number"] {
     justify-content: space-between;
 }
 #downloadInfoPanel {
-    background: #2e2e30;
+    background: var(--panel-color);
     border: 1px solid #3d3d3f;
     border-left: 3px solid var(--primary-color);
     border-radius: 4px;
@@ -245,7 +410,7 @@ input[type="number"] {
     -moz-appearance: none;
     width: 18px;
     height: 18px;
-    background: #252527;
+    background: var(--bg-color);
     border: 1px solid #444;
     border-radius: 4px;
     cursor: pointer;
@@ -270,7 +435,7 @@ input[type="number"] {
 #splitPagesCheckbox:checked::after {
     content: '✓';
     position: absolute;
-    color: white;
+    color: var(--on-primary);
     font-size: 16px;
     font-weight: bold;
     top: 50%;
@@ -318,7 +483,7 @@ input[type="number"] {
     width: calc(50% - 4px);
     cursor: pointer;
     border: 2px solid var(--primary-color);
-    background: #252527;
+    background: var(--bg-color);
     color: #bdbdbd;
     transition: all 0.3s ease;
 }
@@ -328,7 +493,7 @@ input[type="number"] {
     width: calc(50% - 4px);
     cursor: pointer;
     border: 2px solid var(--primary-color);
-    background: #252527;
+    background: var(--bg-color);
     color: #bdbdbd;
     transition: all 0.3s ease;
 }
@@ -364,7 +529,7 @@ input[type="number"] {
     cursor: pointer;
     border: 2px solid var(--primary-color);
     border-radius: 4px;
-    background: #252527;
+    background: var(--bg-color);
     color: #bdbdbd;
     transition: all 0.3s ease;
     box-sizing: border-box;
@@ -395,7 +560,7 @@ input[type="number"] {
     left: 0;
     right: 0;
     z-index: 20;
-    background: #2e2e30;
+    background: var(--panel-color);
     border: 1px solid #444;
     border-radius: 4px;
     max-height: 180px;
@@ -436,7 +601,7 @@ input[type="number"] {
     color: #ddd;
     font-size: 15px;
     font-weight: bold;
-    background: #2e2e30;
+    background: var(--panel-color);
     border: 1px solid #3d3d3f;
     border-radius: 8px;
     padding: 16px 12px;
@@ -450,7 +615,7 @@ input[type="number"] {
 }
 .service-link-btn {
     font-weight: bold;
-    background: #252527 !important;
+    background: var(--bg-color) !important;
     color: #fff !important;
     font-size: 14px;
 }
@@ -478,7 +643,7 @@ input[type="number"] {
     background: rgba(110, 118, 129, 0.12) !important;
 }
 #apiWarning {
-    background: #2e2e30;
+    background: var(--panel-color);
     border: 1px solid #3d3d3f;
     border-left: 3px solid var(--primary-color);
     border-radius: 4px;
@@ -500,7 +665,9 @@ input[type="number"] {
 }
 #historyBtn {
     position: absolute;
-    top: 0;
+    /* По вертикальному центру шапки — на одной линии с серединой логотипа. */
+    top: 50%;
+    transform: translateY(-50%);
     right: 0;
     cursor: pointer;
     color: #bdbdbd;
@@ -513,7 +680,9 @@ input[type="number"] {
 }
 #settingsBtn {
     position: absolute;
-    top: 0;
+    /* По вертикальному центру шапки — на одной линии с серединой логотипа. */
+    top: 50%;
+    transform: translateY(-50%);
     left: 0;
     cursor: pointer;
     color: #bdbdbd;
@@ -527,6 +696,13 @@ input[type="number"] {
 #logoHeader {
     position: relative;
     margin-bottom: 6px;
+}
+/* Все логотипы показываются в размере 165×50 — в том числе нарисованные
+   в двойном разрешении для чётких экранов (logo5.png — 330×100). */
+#siteLogo {
+    width: 165px;
+    height: 50px;
+    object-fit: contain;
 }
 #settingsHeader {
     display: flex;
@@ -543,7 +719,7 @@ input[type="number"] {
     padding-right: 80px;
 }
 .settings-section {
-    background: #2e2e30;
+    background: var(--panel-color);
     border: 1px solid #3d3d3f;
     border-radius: 4px;
     padding: 12px;
@@ -570,7 +746,7 @@ input[type="number"] {
     padding: 6px;
     font-size: 14px;
     text-align: center;
-    background: #252527;
+    background: var(--bg-color);
     color: #fff;
     border: 1px solid #444;
     border-radius: 4px;
@@ -597,7 +773,7 @@ input[type="number"] {
     flex: 1;
     padding: 8px;
     font-size: 13px;
-    background: #252527;
+    background: var(--bg-color);
     color: #bdbdbd;
     border: none;
     cursor: pointer;
@@ -611,7 +787,7 @@ input[type="number"] {
 }
 .settings-toggle-btn.active {
     background: var(--primary-color);
-    color: #fff;
+    color: var(--on-primary);
 }
 .settings-toggle-btn:hover:not(.active) {
     color: #fff;
@@ -622,7 +798,7 @@ input[type="number"] {
     padding: 8px 16px;
     font-size: 14px;
     margin-top: 4px;
-    background: #252527 !important;
+    background: var(--bg-color) !important;
     color: #bdbdbd !important;
     border: 1px solid #444 !important;
     border-radius: 4px !important;
@@ -632,7 +808,7 @@ input[type="number"] {
     box-sizing: border-box;
 }
 .settings-btn-outline:hover {
-    background: #252527 !important;
+    background: var(--bg-color) !important;
     color: #fff !important;
     border-color: var(--primary-color) !important;
     box-shadow: 0 0 5px var(--primary-color);
@@ -654,7 +830,7 @@ input[type="number"] {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    background: #252527;
+    background: var(--bg-color);
     border: 1px solid #3d3d3f;
     border-radius: 4px;
     padding: 8px 10px;
@@ -684,7 +860,7 @@ input[type="number"] {
     -moz-appearance: none;
     width: 18px;
     height: 18px;
-    background: #252527;
+    background: var(--bg-color);
     border: 1px solid #444;
     border-radius: 4px;
     cursor: pointer;
@@ -709,7 +885,7 @@ input[type="number"] {
 .plugin-toggle:checked::after, .settings-checkbox:checked::after {
     content: '✓';
     position: absolute;
-    color: white;
+    color: var(--on-primary);
     font-size: 14px;
     font-weight: bold;
     top: 50%;
@@ -759,7 +935,7 @@ input[type="number"] {
     flex-shrink: 0;
 }
 .history-nav-btn:hover {
-    background: #2e2e30;
+    background: var(--panel-color);
     color: var(--primary-color);
     border-color: var(--primary-color);
 }
@@ -776,14 +952,14 @@ input[type="number"] {
     width: 4px;
 }
 #historyList::-webkit-scrollbar-track {
-    background: #252527;
+    background: var(--bg-color);
 }
 #historyList::-webkit-scrollbar-thumb {
     background: #3d3d3f;
     border-radius: 2px;
 }
 .history-card {
-    background: #2e2e30;
+    background: var(--panel-color);
     border: 1px solid #3d3d3f;
     border-left: 3px solid var(--primary-color);
     border-radius: 4px;
@@ -846,7 +1022,7 @@ input[type="number"] {
 #historyEmptyMsg {
     color: #ddd;
     font-size: 14px;
-    background: #2e2e30;
+    background: var(--panel-color);
     border: 1px solid #3d3d3f;
     border-radius: 8px;
     padding: 20px 12px;

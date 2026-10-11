@@ -8,11 +8,18 @@ export default [
     {
         files: ['**/*.{js,mjs}'],
         languageOptions: {
-            ecmaVersion: 'latest', sourceType: 'module',
+            ecmaVersion: 'latest', sourceType: 'script',
             globals: {
                 ...globals.browser,
                 ...globals.webextensions,
-                ...globals.serviceworker
+                ...globals.serviceworker,
+                EventBus: 'readonly', RateLimiter: 'readonly', ServiceRegistry: 'readonly',
+                DownloadManager: 'readonly', MangaPatcher: 'readonly', ExporterRegistry: 'readonly',
+                PopupController: 'readonly', BaseService: 'readonly', BaseExporter: 'readonly',
+                getExtensionApi: 'readonly', getBrowserEnv: 'readonly',
+                serviceRegistry: 'readonly', module: 'readonly',
+                globalRateLimiter: 'readonly', backgroundDownload: 'readonly',
+                mangalibConfig: 'readonly', ranolibConfig: 'readonly'
             }
         },
         plugins: { 'js-styles': stylisticJS, regexp },
@@ -133,13 +140,5 @@ export default [
                 }
             ]
         }
-    },
-    {
-        files: ['content/**/*.js', 'sandbox.js', 'sw.js'],
-        languageOptions: { sourceType: 'script' }
-    },
-    {
-        files: ['.github/**/*.js'],
-        languageOptions: { sourceType: 'script', globals: { module: 'readonly' } }
     }
 ];

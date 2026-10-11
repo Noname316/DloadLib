@@ -1,49 +1,78 @@
 /**
  * DownloadLib main module
- * Composition root of the popup: registers built-in services, exporters
- * and user plugins, then starts the UI
- * @module app
+ * Initializes the application, registers services, and sets up the UI
  * @license MIT
  * @author ivanvit
- * @version 1.1.0
+ * @version 1.0.7
  */
 
-import './core/pluginApi.js';
-import './services/index.js';
-import './exporters/index.js';
-import { PluginManager } from './core/PluginManager.js';
-import { PopupController } from './ui/PopupController.js';
+'use strict';
 
-console.log('[App] Initializing...');
+(function() {
+    console.log('[App] Initializing...');
 
-/**
- * Создаёт главный контроллер попапа и показывает ошибку в UI, если его
- * конструктор выбросил исключение.
- * @returns {void}
- */
-function initUI() {
-    console.log('[App] Initializing UI...');
+    const extensionApi = typeof getExtensionApi === 'function'
+        ? getExtensionApi()
+        : ((typeof browser !== 'undefined' && browser) || (typeof chrome !== 'undefined' && chrome) || null);
 
-    try {
-        new PopupController();
-    } catch (e) {
-        console.error('[App] Failed to initialize PopupController:', e);
-        document.getElementById('error').textContent = `Ошибка инициализации: ${e.message}`;
-        document.getElementById('error').classList.remove('hidden');
+    if (!extensionApi)
+        console.warn('[App] Extension API is not available in this context');
+
+    const dependencies = [
+        'EventBus',
+        'RateLimiter',
+        'Storage',
+        'DownloadHistory',
+        'ServiceRegistry',
+        'DownloadManager',
+        'MangaPatcher',
+        'ExporterRegistry',
+        'AuthManager',
+        'TemplateLoader',
+        'HistoryController',
+        'ChapterController',
+        'PopupController'
+    ];
+
+    const missing = dependencies.filter(dep => typeof window[dep] === 'undefined');
+
+    if (missing.length > 0) {
+        console.error('[App] Missing dependencies:', missing);
+        document.body.innerHTML = `<div style="padding: 20px; color: red;">Ошибка загрузки модулей: ${missing.join(', ')}</div>`;
+        return;
     }
-}
 
-/**
- * Точка входа приложения: догружает пользовательские плагины, затем
- * инициализирует UI попапа.
- * @returns {Promise<void>}
- */
-async function initApp() {
-    await PluginManager.loadAll();
-    initUI();
-}
+    console.log('[App] All dependencies loaded');
 
-if (document.readyState === 'loading')
-    document.addEventListener('DOMContentLoaded', () => initApp());
-else
-    initApp();
+    /**
+     * Создаёт главный контроллер попапа и показывает ошибку в UI, если его
+     * конструктор выбросил исключение.
+     * @returns {void}
+     */
+    function initUI() {
+        console.log('[App] Initializing UI...');
+
+        try {
+            window.popupController = new window.PopupController();
+        } catch (e) {
+            console.error('[App] Failed to initialize PopupController:', e);
+            document.getElementById('error').textContent = `Ошибка инициализации: ${e.message}`;
+            document.getElementById('error').classList.remove('hidden');
+        }
+    }
+
+    /**
+     * Точка входа приложения: инициализирует UI попапа. Пользовательские плагины
+     * отключены — встроенных форматов и сервисов достаточно, а ранее установленный
+     * плагин (например, CBZ) подменял бы встроенную реализацию.
+     * @returns {void}
+     */
+    function initApp() {
+        initUI();
+    }
+
+    if (document.readyState === 'loading')
+        document.addEventListener('DOMContentLoaded', () => initApp());
+    else
+        setTimeout(() => initApp(), 100);
+})();

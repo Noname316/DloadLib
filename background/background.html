@@ -6,6 +6,20 @@
 <!DOCTYPE html>
 <html>
     <head>
-        <script type="module" src="/background/main.js"></script>
+        <script src="/lib/jszip.min.js"></script>
+        <script src="/lib/html2pdf.min.js"></script>
+        <script src="/core/BrowserApi.js"></script>
+        <script src="/core/RateLimiter.js"></script>
+        <script src="/core/EventBus.js"></script>
+        <script src="/services/ServiceRegistry.js"></script>
+        <script src="/services/mangalib/config.js"></script>
+        <script src="/services/ranobelib/config.js"></script>
+        <script src="/core/MangaPatcher.js"></script>
+        <script src="/exporters/ExporterRegistry.js"></script>
+        <script src="/background/RequestInterceptor.js"></script>
+        <script src="/core/RequestPacer.js"></script>
+        <script src="/background/MessageRouter.js"></script>
+        <script src="/background/TitleJobs.js"></script>
+        <script src="/background/ActionButton.js"></script>
     </head>
 </html>

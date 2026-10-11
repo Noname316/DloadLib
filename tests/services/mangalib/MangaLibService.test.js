@@ -1,43 +1,34 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('../../../core/BrowserApi.js', async () =>
-    (await import('../../helpers/globalBridge.js')).globalBridge('extensionApi', 'requestViaTab', 'NoServiceTabError'));
-vi.mock('../../../core/DownloadManager.js', async () =>
-    (await import('../../helpers/globalBridge.js')).globalBridge('fetchPageImage', 'loadImageOrDefer'));
-vi.mock('../../../core/ImageCompressor.js', async () =>
-    (await import('../../helpers/globalBridge.js')).globalBridge('ImageCompressor'));
-vi.mock('../../../services/mangalib/config.js', async () =>
-    (await import('../../helpers/globalBridge.js')).globalBridge('mangalibConfig'));
-
 let MangaLibService;
 
 beforeEach(async () => {
-    vi.resetModules();
-    global.extensionApi = {
+    global.getExtensionApi = () => ({
         get runtime() {
             if (global.browser && global.browser.runtime) return global.browser.runtime;
             if (global.chrome && global.chrome.runtime) return global.chrome.runtime;
             return undefined;
         }
-    };
-    global.NoServiceTabError = class NoServiceTabError extends Error {};
-    global.loadImageOrDefer = (label, load) => load();
-    global.ImageCompressor = { compress: vi.fn(async (base64, contentType) => ({ base64, contentType })) };
+    });
 
     global.mangalibConfig = {
         name: 'MangaLib',
         baseUrl: 'https://mangalib.me',
         headers: { 'X-Test': '1' },
         fields: ['id', 'title'],
-        imagesDomain: 'https://imgslib.link',
-        hosts: ['mangalib.me', 'mangalib.org'],
-        imageHosts: ['imgslib.link']
+        imagesDomain: 'https://imgslib.link'
     };
-    ({ MangaLibService } = await import('../../../services/mangalib/MangaLibService.js'));
+    const basePath = require.resolve('../../../services/BaseService.js');
+    delete require.cache[basePath];
+    await import('../../../services/BaseService.js');
+    const path = require.resolve('../../../services/mangalib/MangaLibService.js');
+    delete require.cache[path];
+    await import('../../../services/mangalib/MangaLibService.js');
+    MangaLibService = global.MangaLibService;
 });
 
 afterEach(() => {
-    delete global.extensionApi;
+    delete global.getExtensionApi;
     delete global.browser;
     delete global.chrome;
     delete global.fetch;
@@ -55,18 +46,9 @@ describe('MangaLibService', () => {
         logSpy.mockRestore();
     });
 
-    it('Matches the site hosts from the config, including subdomains', () => {
+    it('Matches returns true for mangalib.me and imgslib.link', () => {
         expect(MangaLibService.matches('https://mangalib.me/book')).toBe(true);
-        expect(MangaLibService.matches('https://mangalib.org/ru/manga/x')).toBe(true);
-        expect(MangaLibService.matches('https://test-front.mangalib.me/')).toBe(true);
-    });
-
-    it('Does not match image CDN hosts — they are not service sites', () => {
-        expect(MangaLibService.matches('https://imgslib.link/')).toBe(false);
-    });
-
-    it('Does not match hosts that only end with the service domain', () => {
-        expect(MangaLibService.matches('https://notmangalib.me/')).toBe(false);
+        expect(MangaLibService.matches('https://imgslib.link/')).toBe(true);
     });
 
     it('Matches returns false for other urls or invalid', () => {
@@ -458,35 +440,6 @@ describe('MangaLibService', () => {
         delete global.NoServiceTabError;
     });
 
-    it('Process chapter content loads pages through loadImageOrDefer', async () => {
-        const svc = new MangaLibService();
-        svc.extractPages = vi.fn().mockReturnValue(['img1.jpg', 'img2.jpg', 'img3.jpg']);
-        const placeholder = { type: 'text', text: 'pending 2' };
-        let deferredLoad;
-        global.loadImageOrDefer = vi.fn(async (label, load) => {
-            if (label !== 2) return load();
-            deferredLoad = load;
-            return [placeholder];
-        });
-        svc.loadPageAsBase64 = vi.fn()
-            .mockResolvedValueOnce({ base64: 'abc', contentType: 'image/jpeg' })
-            .mockResolvedValueOnce(null)
-            .mockResolvedValueOnce([
-                { base64: 'p1', contentType: 'image/jpeg' },
-                { base64: 'p2', contentType: 'image/jpeg' }
-            ]);
-        const result = await svc.processChapterContent([], null, { chapterMeta: { pages: ['img1.jpg', 'img2.jpg', 'img3.jpg'] } });
-        expect(result[0].type).toBe('image');
-        expect(result[1]).toBe(placeholder);
-        expect(result[2].text).toBe('[Ошибка загрузки изображения 3]');
-
-        const loaded = await deferredLoad();
-        expect(svc.loadPageAsBase64).toHaveBeenLastCalledWith('img2.jpg', expect.any(Object));
-        expect(loaded.map(b => b.data.base64)).toEqual(['p1', 'p2']);
-        expect(loaded[0]).toMatchObject({ originalIndex: 1, partIndex: 0, totalParts: 2 });
-        delete global.loadImageOrDefer;
-    });
-
     it('Process chapter content returns split images as blocks', async () => {
         const svc = new MangaLibService();
         svc.extractPages = vi.fn().mockReturnValue(['img1.jpg']);
@@ -811,6 +764,24 @@ describe('MangaLibService', () => {
         delete global.ImageCompressor;
     });
 
+    it('_processImage returns split parts as is when imageFit is set but ImageCompressor is absent', async () => {
+        const svc = new MangaLibService();
+        global.browser = { runtime: { sendMessage: vi.fn() } };
+        global.fetchPageImage = vi.fn().mockResolvedValue({ ok: true, base64: 'raw', contentType: 'image/jpeg' });
+        const parts = [
+            { base64: 'p1', contentType: 'image/jpeg' },
+            { base64: 'p2', contentType: 'image/jpeg' }
+        ];
+        svc.splitLongImage = vi.fn().mockResolvedValue(parts);
+        delete global.ImageCompressor;
+        const result = await svc.loadPageAsBase64('img.jpg', {
+            splitLongImages: true, imageFit: { maxWidth: 560, maxHeight: 740 }
+        });
+        expect(result).toEqual(parts);
+        delete global.browser;
+        delete global.fetchPageImage;
+    });
+
     it('_processImage calls ImageCompressor.compress when splitLongImages is false', async () => {
         const svc = new MangaLibService();
         global.browser = { runtime: { sendMessage: vi.fn() } };
@@ -877,5 +848,22 @@ describe('MangaLibService', () => {
         expect(warnSpy).toHaveBeenCalled();
         delete global.fetchPageImage;
         warnSpy.mockRestore();
+    });
+
+    it('Registers with serviceRegistry when it is already defined on load', async () => {
+        vi.resetModules();
+        const register = vi.fn();
+        global.serviceRegistry = { register };
+        global.mangalibConfig = {
+            name: 'MangaLib',
+            baseUrl: 'https://mangalib.me',
+            headers: {},
+            fields: [],
+            imagesDomain: 'https://imgslib.link'
+        };
+        await import('../../../services/BaseService.js');
+        await import('../../../services/mangalib/MangaLibService.js');
+        expect(register).toHaveBeenCalledWith(expect.any(Function));
+        delete global.serviceRegistry;
     });
 });

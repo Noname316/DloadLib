@@ -85,29 +85,22 @@ npm install
 
 ```
 DownloadLib/
-├── app.js                   # Точка входа popup (ES-модуль): регистрирует сервисы, экспортёры, плагины, создаёт PopupController
+├── app.js                   # Точка входа popup: проверяет зависимости, создаёт PopupController
 ├── popup.html               # Страница попапа (оболочка; шаблоны подгружает TemplateLoader)
-├── background/              # Фоновые модули
-│   ├── main.js              # Общая точка входа фона: импортирует RequestInterceptor и MessageRouter
-│   ├── service-worker.js    # Chrome: модульный service worker, импортирует main.js
-│   ├── background.html      # Firefox: фоновая страница, подключает main.js как модуль
-│   ├── RequestInterceptor.js# Захват токенов из запросов страниц сервиса, CORS изображений в Firefox
-│   ├── tokenStore.js        # Хранилище токенов авторизации (storage.session, проверка exp)
-│   ├── rateLimitService.js  # Единственный ограничитель частоты запросов для всех окон
-│   ├── pluginHosts.js       # Хосты сайтов сервисных плагинов
-│   ├── netRules.js          # Правила declarativeNetRequest из конфигов (блокировка рекламы)
-│   └── MessageRouter.js     # Маршрутизация runtime.onMessage с проверкой отправителя, регистрация content scripts
+├── background/              # Фоновые скрипты
+│   ├── service-worker.js    # Chrome: точка входа SW, грузит всё через importScripts
+│   ├── background.html      # Firefox: точка входа фоновой страницы
+│   ├── RequestInterceptor.js# Перехват HTTP-запросов, заголовки, авторизация, блокировка рекламы
+│   └── MessageRouter.js     # Маршрутизация runtime.onMessage (fetchImage, fetchWithRateLimit, …)
 ├── content/                 # Контент-скрипты (исполняются на страницах сайтов)
 │   ├── AdCleaner.js         # Удаляет рекламные элементы
-│   └── DownloadButton.js    # Инжектирует кнопку «Скачать» на странице тайтла
+│   ├── DownloadButton.js    # Инжектирует кнопку «Скачать» на странице тайтла
+│   └── ImageFetcher.js      # Прокидывает fetch изображений через вкладку в background
 ├── core/                    # Ядро: логика загрузки, утилиты, хранилища
 │   ├── BrowserApi.js        # Единый API-адаптер (Firefox/Chrome)
-│   ├── messages.js          # Имена runtime-сообщений (MSG) и порта keep-alive
 │   ├── EventBus.js          # Pub/Sub шина событий
-│   ├── RateLimiter.js       # Ограничитель частоты запросов (скользящее окно)
-│   ├── RateLimitClient.js   # Клиент ограничителя фона для окон расширения
-│   ├── Storage.js           # SafeStorage: обёртка над localStorage
-│   ├── pluginApi.js         # Публикует в globalThis классы и реестры для плагинов
+│   ├── RateLimiter.js       # Ограничитель частоты запросов
+│   ├── Storage.js           # Обёртка над localStorage
 │   ├── DownloadHistory.js   # Хранение истории загрузок (до 10 записей)
 │   ├── AuthManager.js       # Извлечение и кэширование JWT-токенов авторизации
 │   ├── MangaPatcher.js      # Нормализация метаданных тайтла
@@ -117,7 +110,7 @@ DownloadLib/
 ├── ui/                      # UI-контроллеры попапа
 ├── templates/               # HTML-фрагменты (подгружаются динамически)
 ├── exporters/               # Экспортёры форматов (FB2, EPUB, MOBI, PDF, TXT, JPEG)
-├── services/                # Адаптеры сайтов (MangaLib, RanobeLib)
+├── services/                # Адаптеры для конкретных сайтов (MangaLib, RanobeLib)
 ├── css/                     # Стили интерфейса
 ├── lib/                     # Сторонние библиотеки (jszip, html2pdf)
 ├── plugins/                 # Официальные плагины (пример для пользователей)
@@ -184,9 +177,11 @@ npm run test:coverage
 
 Если хотите помочь с реализацией одного из запланированных пунктов — упомяните это в своём issue или PR, чтобы не дублировать работу.
 
-- [ ] Ограничитель загрузки по главам (1.1.0)
+- [x] Фикс разных отображений в ридерах [Issue #28 & #29] (1.0.11)
+- [x] Полное покрытие методов jsDoc (1.0.11)
+- [ ] Фикс загрузки [Issue #32] (1.0.11)
 - [ ] Улучшить блокировку рекламы в Chromium (1.1.0)
-- [x] Ускорение загрузки временным скипом "завсиших" глав (1.1.0)
+- [ ] Ускорение загрузки временным скипом "завсиших" глав (1.1.0)
 - [ ] Общий рефакторинг архитектуры (1.1.0)
 - [ ] e2e тесты (1.1.0+)
 - [ ] Добавить возможность выбора сервера (ожидание API)

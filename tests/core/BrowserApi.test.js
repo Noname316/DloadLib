@@ -2,13 +2,25 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 async function loadBrowserApi() {
     vi.resetModules();
-    return import('../../core/BrowserApi.js');
+    await import('../../core/BrowserApi.js');
 }
 
-function clearBrowserGlobals() {
+function getHost() {
+    return typeof window !== 'undefined' ? window : global;
+}
+
+function clearBrowserApiGlobals() {
+    delete global.extensionApi;
+    delete global.browserEnv;
+    delete global.getExtensionApi;
+    delete global.getBrowserEnv;
     delete global.browser;
     delete global.chrome;
     if (typeof window !== 'undefined') {
+        delete window.extensionApi;
+        delete window.browserEnv;
+        delete window.getExtensionApi;
+        delete window.getBrowserEnv;
         delete window.browser;
         delete window.chrome;
     }
@@ -16,7 +28,7 @@ function clearBrowserGlobals() {
 
 describe('BrowserApi', () => {
     beforeEach(() => {
-        clearBrowserGlobals();
+        clearBrowserApiGlobals();
     });
 
     it('Uses browser native api when available', async () => {
@@ -26,11 +38,16 @@ describe('BrowserApi', () => {
             windows: { getCurrent: async () => ({}) }
         };
         global.browser = browserApi;
+        if (typeof window !== 'undefined') window.browser = browserApi;
 
-        const { extensionApi, browserEnv } = await loadBrowserApi();
+        await loadBrowserApi();
 
-        expect(extensionApi).toBe(browserApi);
-        expect(browserEnv).toEqual({
+        const host = getHost();
+        const api = host.getExtensionApi();
+        const env = host.getBrowserEnv();
+
+        expect(api).toBe(browserApi);
+        expect(env).toEqual({
             nativeName: 'browser',
             isFirefox: true,
             isChromium: false,
@@ -38,18 +55,47 @@ describe('BrowserApi', () => {
         });
     });
 
-    it('Uses the chrome namespace as is (MV3 chrome.* methods already return promises)', async () => {
+    it('Creates chrome promise wrappers and resolves values', async () => {
+        const sendMessage = (payload, cb) => cb({ ok: true, payload });
+        const query = (queryInfo, cb) => cb([{ id: 1, queryInfo }]);
+        const getCurrent = (cb) => cb({ id: 10 });
+        const create = (opts, cb) => cb({ id: 11, opts });
+        const update = (id, opts, cb) => cb({ id, opts });
+        const download = (opts, cb) => cb(42);
+        const localGet = (keys, cb) => cb({ keys });
+        const localSet = (value, cb) => cb(value);
+
         const chromeApi = {
-            runtime: { sendMessage: vi.fn(async () => ({ ok: true })) },
+            runtime: { sendMessage, lastError: null },
+            tabs: { query },
+            windows: { getCurrent, create, update },
+            downloads: { download },
+            storage: { local: { get: localGet, set: localSet } },
+            webRequest: { onBeforeSendHeaders: {} },
             declarativeNetRequest: { updateDynamicRules: () => {} }
         };
+
         global.chrome = chromeApi;
+        if (typeof window !== 'undefined') window.chrome = chromeApi;
 
-        const { extensionApi, browserEnv } = await loadBrowserApi();
+        await loadBrowserApi();
 
-        expect(extensionApi).toBe(chromeApi);
-        await expect(extensionApi.runtime.sendMessage({ a: 1 })).resolves.toEqual({ ok: true });
-        expect(browserEnv).toEqual({
+        const host = getHost();
+        const api = host.getExtensionApi();
+        const env = host.getBrowserEnv();
+
+        await expect(api.runtime.sendMessage({ a: 1 })).resolves.toEqual({ ok: true, payload: { a: 1 } });
+        await expect(api.tabs.query({ active: true })).resolves.toEqual([{ id: 1, queryInfo: { active: true } }]);
+        await expect(api.windows.getCurrent()).resolves.toEqual({ id: 10 });
+        await expect(api.windows.create({ type: 'popup' })).resolves.toEqual({ id: 11, opts: { type: 'popup' } });
+        await expect(api.windows.update(11, { focused: true })).resolves.toEqual({ id: 11, opts: { focused: true } });
+        await expect(api.downloads.download({ filename: 'a.txt' })).resolves.toBe(42);
+        await expect(api.storage.local.get(['a'])).resolves.toEqual({ keys: ['a'] });
+        await expect(api.storage.local.set({ a: 1 })).resolves.toEqual({ a: 1 });
+        expect(api.webRequest).toBe(chromeApi.webRequest);
+        expect(api.declarativeNetRequest).toBe(chromeApi.declarativeNetRequest);
+
+        expect(env).toEqual({
             nativeName: 'chrome',
             isFirefox: false,
             isChromium: true,
@@ -57,24 +103,105 @@ describe('BrowserApi', () => {
         });
     });
 
-    it('Prefers browser over chrome when both namespaces exist', async () => {
-        const browserApi = { runtime: {} };
-        global.browser = browserApi;
-        global.chrome = { runtime: {}, declarativeNetRequest: {} };
+    it('Rejects wrapped chrome calls when lastError is set', async () => {
+        const chromeApi = {
+            runtime: {
+                lastError: null,
+                sendMessage: (_payload, cb) => {
+                    chromeApi.runtime.lastError = { message: 'boom' };
+                    cb('ignored');
+                    chromeApi.runtime.lastError = null;
+                }
+            },
+            tabs: { query: (_q, cb) => cb([]) },
+            windows: { getCurrent: (cb) => cb({}), create: (_o, cb) => cb({}), update: (_i, _o, cb) => cb({}) },
+            downloads: { download: (_o, cb) => cb(1) },
+            storage: { local: { get: (_k, cb) => cb({}), set: (_v, cb) => cb({}) } }
+        };
 
-        const { extensionApi, browserEnv } = await loadBrowserApi();
+        global.chrome = chromeApi;
+        if (typeof window !== 'undefined') window.chrome = chromeApi;
 
-        expect(extensionApi).toBe(browserApi);
-        expect(browserEnv.nativeName).toBe('browser');
-        expect(browserEnv.isFirefox).toBe(false);
-        expect(browserEnv.isChromium).toBe(true);
+        await loadBrowserApi();
+
+        const host = getHost();
+        const api = host.getExtensionApi();
+        await expect(api.runtime.sendMessage({})).rejects.toThrow('boom');
+    });
+
+    it('Rejects wrapped chrome calls using stringified lastError fallback', async () => {
+        const chromeApi = {
+            runtime: {
+                lastError: null,
+                sendMessage: (_payload, cb) => {
+                    chromeApi.runtime.lastError = {};
+                    cb('ignored');
+                    chromeApi.runtime.lastError = null;
+                }
+            },
+            tabs: { query: (_q, cb) => cb([]) },
+            windows: { getCurrent: (cb) => cb({}), create: (_o, cb) => cb({}), update: (_i, _o, cb) => cb({}) },
+            downloads: { download: (_o, cb) => cb(1) },
+            storage: { local: { get: (_k, cb) => cb({}), set: (_v, cb) => cb({}) } }
+        };
+
+        global.chrome = chromeApi;
+        if (typeof window !== 'undefined') window.chrome = chromeApi;
+
+        await loadBrowserApi();
+
+        const host = getHost();
+        const api = host.getExtensionApi();
+        await expect(api.runtime.sendMessage({})).rejects.toThrow('[object Object]');
+    });
+
+    it('Rejects wrapped chrome calls on sync throw', async () => {
+        const chromeApi = {
+            runtime: {
+                lastError: null,
+                sendMessage: () => { throw new Error('sync fail'); }
+            },
+            tabs: { query: (_q, cb) => cb([]) },
+            windows: { getCurrent: (cb) => cb({}), create: (_o, cb) => cb({}), update: (_i, _o, cb) => cb({}) },
+            downloads: { download: (_o, cb) => cb(1) },
+            storage: { local: { get: (_k, cb) => cb({}), set: (_v, cb) => cb({}) } }
+        };
+
+        global.chrome = chromeApi;
+        if (typeof window !== 'undefined') window.chrome = chromeApi;
+
+        await loadBrowserApi();
+
+        const host = getHost();
+        const api = host.getExtensionApi();
+        await expect(api.runtime.sendMessage({})).rejects.toThrow('sync fail');
+    });
+
+    it('Keeps storage.local undefined when chrome storage local is missing', async () => {
+        const chromeApi = {
+            runtime: { sendMessage: (_payload, cb) => cb({}), lastError: null },
+            tabs: { query: (_q, cb) => cb([]) },
+            windows: { getCurrent: (cb) => cb({}), create: (_o, cb) => cb({}), update: (_i, _o, cb) => cb({}) },
+            downloads: { download: (_o, cb) => cb(1) },
+            storage: undefined
+        };
+
+        global.chrome = chromeApi;
+        if (typeof window !== 'undefined') window.chrome = chromeApi;
+
+        await loadBrowserApi();
+
+        const host = getHost();
+        const api = host.getExtensionApi();
+        expect(api.storage.local).toBeUndefined();
     });
 
     it('Returns null api and default env when no browser globals exist', async () => {
-        const { extensionApi, browserEnv } = await loadBrowserApi();
+        await loadBrowserApi();
 
-        expect(extensionApi).toBeNull();
-        expect(browserEnv).toEqual({
+        const host = getHost();
+        expect(host.getExtensionApi()).toBeNull();
+        expect(host.getBrowserEnv()).toEqual({
             nativeName: 'none',
             isFirefox: false,
             isChromium: false,
@@ -82,45 +209,131 @@ describe('BrowserApi', () => {
         });
     });
 
-    it('Detects firefox mode from browser presence when dnr is not supported', async () => {
-        global.browser = { runtime: {} };
-        global.chrome = { runtime: {}, tabs: {}, windows: {}, downloads: {}, storage: {} };
+    it('Returns default env from getter when stored env is missing', async () => {
+        await loadBrowserApi();
 
-        const { browserEnv } = await loadBrowserApi();
+        const host = getHost();
+        delete host.browserEnv;
 
-        expect(browserEnv.supportsDnr).toBe(false);
-        expect(browserEnv.isFirefox).toBe(true);
-        expect(browserEnv.isChromium).toBe(false);
+        expect(host.getBrowserEnv()).toEqual({
+            nativeName: 'none',
+            isFirefox: false,
+            isChromium: false,
+            supportsDnr: false
+        });
     });
 
+    it('Attaches api helpers to self when window is unavailable', async () => {
+        const originalWindow = global.window;
+        const originalSelf = global.self;
+        const originalBrowser = global.browser;
+
+        delete global.window;
+        global.self = global;
+        global.browser = {
+            runtime: { sendMessage: async () => ({ ok: true }) },
+            tabs: { query: async () => [] },
+            windows: { getCurrent: async () => ({}) }
+        };
+
+        await loadBrowserApi();
+
+        expect(global.self.getExtensionApi).toBeTypeOf('function');
+        expect(global.self.getBrowserEnv).toBeTypeOf('function');
+        expect(global.self.getBrowserEnv().nativeName).toBe('browser');
+
+        if (originalWindow !== undefined) global.window = originalWindow;
+        else delete global.window;
+        if (originalSelf !== undefined) global.self = originalSelf;
+        else delete global.self;
+        if (originalBrowser !== undefined) global.browser = originalBrowser;
+        else delete global.browser;
+    });
+
+    it('Returns null extension api when chrome provider disappears during resolution', async () => {
+        vi.resetModules();
+        const host = typeof window !== 'undefined' ? window : globalThis;
+        delete host.browser;
+        delete host.extensionApi;
+        delete host.browserEnv;
+        delete host.getExtensionApi;
+        delete host.getBrowserEnv;
+        let reads = 0;
+        Object.defineProperty(host, 'chrome', {
+            configurable: true,
+            get() {
+                reads += 1;
+                if (reads < 3) return { declarativeNetRequest: {}, runtime: {}, tabs: {}, windows: {}, downloads: {}, storage: {} };
+                return null;
+            }
+        });
+        await import('../../core/BrowserApi.js');
+        expect(host.getExtensionApi()).toBeNull();
+        expect(host.getBrowserEnv().nativeName).toBe('chrome');
+        delete host.chrome;
+    });
+
+    it('Detects firefox mode from browser presence when dnr is not supported', async () => {
+        vi.resetModules();
+        const host = typeof window !== 'undefined' ? window : globalThis;
+        delete host.extensionApi;
+        delete host.browserEnv;
+        delete host.getExtensionApi;
+        delete host.getBrowserEnv;
+        let browserReads = 0;
+        Object.defineProperty(host, 'browser', {
+            configurable: true,
+            get() {
+                browserReads += 1;
+                if (browserReads <= 2) return null;
+                return { runtime: {} };
+            }
+        });
+        Object.defineProperty(host, 'chrome', {
+            configurable: true,
+            value: { runtime: {}, tabs: {}, windows: {}, downloads: {}, storage: {} }
+        });
+        await import('../../core/BrowserApi.js');
+        const env = host.getBrowserEnv();
+        expect(env.nativeName).toBe('chrome');
+        expect(env.supportsDnr).toBe(false);
+        expect(env.isFirefox).toBe(true);
+        expect(env.isChromium).toBe(false);
+        delete host.browser;
+        delete host.chrome;
+    });
     describe('setServiceTab / fetchViaTab', () => {
         async function setupWithBrowser(browserApi) {
-            clearBrowserGlobals();
+            clearBrowserApiGlobals();
             global.browser = browserApi;
-            return loadBrowserApi();
+            if (typeof window !== 'undefined') window.browser = browserApi;
+            await loadBrowserApi();
         }
 
         it('fetchViaTab returns null when scripting API is absent', async () => {
-            const api = await setupWithBrowser({ runtime: {}, tabs: { query: async () => [] } });
-            expect(await api.fetchViaTab('https://example.com/img.jpg', 'mangalib')).toBeNull();
+            await setupWithBrowser({ runtime: {}, tabs: { query: async () => [] } });
+            const host = getHost();
+            expect(await host.fetchViaTab('https://example.com/img.jpg', 'mangalib')).toBeNull();
         });
 
         it('fetchViaTab returns null when no tab found', async () => {
             const executeScript = vi.fn(async () => [{ result: { ok: true, base64: 'x', contentType: 'image/jpeg' } }]);
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => [] },
                 scripting: { executeScript }
             });
-            expect(await api.fetchViaTab('https://example.com/img.jpg', 'mangalib')).toBeNull();
+            const host = getHost();
+            expect(await host.fetchViaTab('https://example.com/img.jpg', 'mangalib')).toBeNull();
             expect(executeScript).not.toHaveBeenCalled();
         });
 
         it('fetchViaTab uses ranobelib URL pattern for ranobelib service', async () => {
             const tabsQuery = vi.fn(async ({ url }) => url[0].includes('ranobelib') ? [{ id: 5 }] : []);
             const executeScript = vi.fn(async () => [{ result: { ok: true, base64: 'xyz', contentType: 'image/png' } }]);
-            const api = await setupWithBrowser({ runtime: {}, tabs: { query: tabsQuery }, scripting: { executeScript } });
-            const result = await api.fetchViaTab('https://cdn.example.com/img.jpg', 'ranobelib');
+            await setupWithBrowser({ runtime: {}, tabs: { query: tabsQuery }, scripting: { executeScript } });
+            const host = getHost();
+            const result = await host.fetchViaTab('https://cdn.example.com/img.jpg', 'ranobelib');
             expect(tabsQuery).toHaveBeenCalledWith({ url: ['*://ranobelib.me/*'] });
             expect(result).toEqual({ ok: true, base64: 'xyz', contentType: 'image/png' });
         });
@@ -128,60 +341,66 @@ describe('BrowserApi', () => {
         it('fetchViaTab uses mangalib URL patterns for other services', async () => {
             const tabsQuery = vi.fn(async () => [{ id: 3 }]);
             const executeScript = vi.fn(async () => [{ result: { ok: true, base64: 'abc', contentType: 'image/jpeg' } }]);
-            const api = await setupWithBrowser({ runtime: {}, tabs: { query: tabsQuery }, scripting: { executeScript } });
-            await api.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib');
+            await setupWithBrowser({ runtime: {}, tabs: { query: tabsQuery }, scripting: { executeScript } });
+            const host = getHost();
+            await host.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib');
             expect(tabsQuery).toHaveBeenCalledWith({ url: ['*://mangalib.me/*', '*://mangalib.org/*'] });
         });
 
         it('fetchViaTab caches found tab ID for subsequent calls', async () => {
             const tabsQuery = vi.fn(async () => [{ id: 9 }]);
             const executeScript = vi.fn(async () => [{ result: { ok: true, base64: 'r', contentType: 'image/jpeg' } }]);
-            const api = await setupWithBrowser({ runtime: {}, tabs: { query: tabsQuery }, scripting: { executeScript } });
-            await api.fetchViaTab('https://cdn.example.com/a.jpg', 'mangalib');
-            await api.fetchViaTab('https://cdn.example.com/b.jpg', 'mangalib');
+            await setupWithBrowser({ runtime: {}, tabs: { query: tabsQuery }, scripting: { executeScript } });
+            const host = getHost();
+            await host.fetchViaTab('https://cdn.example.com/a.jpg', 'mangalib');
+            await host.fetchViaTab('https://cdn.example.com/b.jpg', 'mangalib');
             expect(tabsQuery).toHaveBeenCalledTimes(1);
             expect(executeScript).toHaveBeenCalledTimes(2);
         });
 
         it('fetchViaTab returns null and warns when tabs.query throws', async () => {
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => { throw new Error('tabs error'); } },
                 scripting: { executeScript: vi.fn() }
             });
             const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-            expect(await api.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib')).toBeNull();
+            const host = getHost();
+            expect(await host.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib')).toBeNull();
             expect(warnSpy).toHaveBeenCalledWith('[BrowserApi] tabs.query failed:', 'tabs error');
             warnSpy.mockRestore();
         });
 
         it('fetchViaTab returns null and warns when executeScript throws', async () => {
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => [{ id: 7 }] },
                 scripting: { executeScript: async () => { throw new Error('script error'); } }
             });
             const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-            expect(await api.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib')).toBeNull();
+            const host = getHost();
+            expect(await host.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib')).toBeNull();
             expect(warnSpy).toHaveBeenCalledWith('[BrowserApi] fetchViaTab failed:', 'script error');
             warnSpy.mockRestore();
         });
 
         it('fetchViaTab returns null when executeScript returns no result', async () => {
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => [{ id: 8 }] },
                 scripting: { executeScript: async () => null }
             });
-            expect(await api.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib')).toBeNull();
+            const host = getHost();
+            expect(await host.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib')).toBeNull();
         });
 
         it('setServiceTab causes fetchViaTab to skip tabs.query', async () => {
             const tabsQuery = vi.fn(async () => []);
             const executeScript = vi.fn(async () => [{ result: { ok: true, base64: 'c', contentType: 'image/jpeg' } }]);
-            const api = await setupWithBrowser({ runtime: {}, tabs: { query: tabsQuery }, scripting: { executeScript } });
-            api.setServiceTab(42);
-            const result = await api.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib');
+            await setupWithBrowser({ runtime: {}, tabs: { query: tabsQuery }, scripting: { executeScript } });
+            const host = getHost();
+            host.setServiceTab(42);
+            const result = await host.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib');
             expect(tabsQuery).not.toHaveBeenCalled();
             expect(executeScript).toHaveBeenCalledWith(expect.objectContaining({ target: { tabId: 42 } }));
             expect(result).toEqual({ ok: true, base64: 'c', contentType: 'image/jpeg' });
@@ -190,13 +409,14 @@ describe('BrowserApi', () => {
         it('fetchViaTab re-queries when cached tab has expired', async () => {
             const tabsQuery = vi.fn(async () => [{ id: 77 }]);
             const executeScript = vi.fn(async () => [{ result: { ok: true, base64: 'e', contentType: 'image/jpeg' } }]);
-            const api = await setupWithBrowser({ runtime: {}, tabs: { query: tabsQuery }, scripting: { executeScript } });
+            await setupWithBrowser({ runtime: {}, tabs: { query: tabsQuery }, scripting: { executeScript } });
+            const host = getHost();
 
             const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(0);
-            api.setServiceTab(50);
+            host.setServiceTab(50);
             nowSpy.mockReturnValue(3600001);
 
-            await api.fetchViaTab('https://cdn.example.com/img.jpg', 'ranobelib');
+            await host.fetchViaTab('https://cdn.example.com/img.jpg', 'ranobelib');
             expect(tabsQuery).toHaveBeenCalledTimes(1);
             nowSpy.mockRestore();
         });
@@ -210,13 +430,14 @@ describe('BrowserApi', () => {
                 }));
                 const tabsQuery = vi.fn(async () => [{ id: 11 }]);
                 const executeScript = vi.fn(async () => [{ result: { ok: true, base64: 'p', contentType: 'image/png' } }]);
-                const api = await setupWithBrowser({
+                await setupWithBrowser({
                     runtime: {},
                     tabs: { query: tabsQuery },
                     scripting: { executeScript },
                     storage: { local: { get: storageGet } }
                 });
-                const result = await api.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
+                const host = getHost();
+                const result = await host.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
                 expect(storageGet).toHaveBeenCalledWith('custom_plugins');
                 expect(tabsQuery).toHaveBeenCalledWith({ url: ['*://hentailib.me/*', '*://hentailib.org/*'] });
                 expect(result).toEqual({ ok: true, base64: 'p', contentType: 'image/png' });
@@ -225,13 +446,14 @@ describe('BrowserApi', () => {
             it('returns null without querying tabs when the plugin is not found in storage', async () => {
                 const storageGet = vi.fn(async () => ({ custom_plugins: [] }));
                 const tabsQuery = vi.fn(async () => [{ id: 1 }]);
-                const api = await setupWithBrowser({
+                await setupWithBrowser({
                     runtime: {},
                     tabs: { query: tabsQuery },
                     scripting: { executeScript: vi.fn() },
                     storage: { local: { get: storageGet } }
                 });
-                const result = await api.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
+                const host = getHost();
+                const result = await host.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
                 expect(result).toBeNull();
                 expect(tabsQuery).not.toHaveBeenCalled();
             });
@@ -239,13 +461,14 @@ describe('BrowserApi', () => {
             it('returns null when storage has no custom_plugins key at all', async () => {
                 const storageGet = vi.fn(async () => ({}));
                 const tabsQuery = vi.fn(async () => [{ id: 1 }]);
-                const api = await setupWithBrowser({
+                await setupWithBrowser({
                     runtime: {},
                     tabs: { query: tabsQuery },
                     scripting: { executeScript: vi.fn() },
                     storage: { local: { get: storageGet } }
                 });
-                const result = await api.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
+                const host = getHost();
+                const result = await host.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
                 expect(result).toBeNull();
                 expect(tabsQuery).not.toHaveBeenCalled();
             });
@@ -254,35 +477,38 @@ describe('BrowserApi', () => {
                 const storageGet = vi.fn(async () => ({
                     custom_plugins: [{ service: 'hlib', hosts: ['hentailib.me'], enabled: false }]
                 }));
-                const api = await setupWithBrowser({
+                await setupWithBrowser({
                     runtime: {},
                     tabs: { query: vi.fn() },
                     scripting: { executeScript: vi.fn() },
                     storage: { local: { get: storageGet } }
                 });
-                const result = await api.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
+                const host = getHost();
+                const result = await host.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
                 expect(result).toBeNull();
             });
 
             it('returns null when storage API is unavailable for a plugin serviceKey', async () => {
-                const api = await setupWithBrowser({
+                await setupWithBrowser({
                     runtime: {},
                     tabs: { query: vi.fn() },
                     scripting: { executeScript: vi.fn() }
                 });
-                const result = await api.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
+                const host = getHost();
+                const result = await host.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
                 expect(result).toBeNull();
             });
 
             it('returns null and swallows the error when storage.local.get throws', async () => {
                 const storageGet = vi.fn().mockRejectedValue(new Error('storage error'));
-                const api = await setupWithBrowser({
+                await setupWithBrowser({
                     runtime: {},
                     tabs: { query: vi.fn() },
                     scripting: { executeScript: vi.fn() },
                     storage: { local: { get: storageGet } }
                 });
-                const result = await api.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
+                const host = getHost();
+                const result = await host.fetchViaTab('https://img3h.hentaicdn.org/a.png', 'hlib');
                 expect(result).toBeNull();
             });
         });
@@ -291,7 +517,7 @@ describe('BrowserApi', () => {
             let capturedFunc;
 
             beforeEach(async () => {
-                const api = await setupWithBrowser({
+                await setupWithBrowser({
                     runtime: {},
                     tabs: { query: async () => [{ id: 1 }] },
                     scripting: {
@@ -301,7 +527,7 @@ describe('BrowserApi', () => {
                         }
                     }
                 });
-                await api.fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib');
+                await getHost().fetchViaTab('https://cdn.example.com/img.jpg', 'mangalib');
             });
 
             afterEach(() => {
@@ -352,47 +578,53 @@ describe('BrowserApi', () => {
 
     describe('requestViaTab / hasServiceTab', () => {
         async function setupWithBrowser(browserApi) {
-            clearBrowserGlobals();
+            clearBrowserApiGlobals();
             global.browser = browserApi;
-            return loadBrowserApi();
+            if (typeof window !== 'undefined') window.browser = browserApi;
+            await loadBrowserApi();
         }
 
         it('hasServiceTab returns false when scripting API is absent', async () => {
-            const api = await setupWithBrowser({ runtime: {}, tabs: { query: async () => [] } });
-            expect(await api.hasServiceTab('mangalib')).toBe(false);
+            await setupWithBrowser({ runtime: {}, tabs: { query: async () => [] } });
+            const host = getHost();
+            expect(await host.hasServiceTab('mangalib')).toBe(false);
         });
 
         it('hasServiceTab returns false when no tab found', async () => {
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => [] },
                 scripting: { executeScript: vi.fn() }
             });
-            expect(await api.hasServiceTab('mangalib')).toBe(false);
+            const host = getHost();
+            expect(await host.hasServiceTab('mangalib')).toBe(false);
         });
 
         it('hasServiceTab returns true when a tab is found', async () => {
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => [{ id: 3 }] },
                 scripting: { executeScript: vi.fn() }
             });
-            expect(await api.hasServiceTab('mangalib')).toBe(true);
+            const host = getHost();
+            expect(await host.hasServiceTab('mangalib')).toBe(true);
         });
 
         it('requestViaTab returns noTab:true when scripting API is absent', async () => {
-            const api = await setupWithBrowser({ runtime: {}, tabs: { query: async () => [] } });
-            expect(await api.requestViaTab('https://api.example.com/x', {}, 'mangalib'))
+            await setupWithBrowser({ runtime: {}, tabs: { query: async () => [] } });
+            const host = getHost();
+            expect(await host.requestViaTab('https://api.example.com/x', {}, 'mangalib'))
                 .toEqual({ ok: false, noTab: true });
         });
 
         it('requestViaTab returns noTab:true when no tab found', async () => {
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => [] },
                 scripting: { executeScript: vi.fn() }
             });
-            expect(await api.requestViaTab('https://api.example.com/x', {}, 'mangalib'))
+            const host = getHost();
+            expect(await host.requestViaTab('https://api.example.com/x', {}, 'mangalib'))
                 .toEqual({ ok: false, noTab: true });
         });
 
@@ -400,12 +632,13 @@ describe('BrowserApi', () => {
             const executeScript = vi.fn(async () => [{
                 result: { ok: true, status: 200, text: '{"a":1}', retryAfter: null }
             }]);
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => [{ id: 4 }] },
                 scripting: { executeScript }
             });
-            const result = await api.requestViaTab('https://api.example.com/x', { method: 'GET' }, 'mangalib');
+            const host = getHost();
+            const result = await host.requestViaTab('https://api.example.com/x', { method: 'GET' }, 'mangalib');
             expect(executeScript).toHaveBeenCalledWith(expect.objectContaining({
                 target: { tabId: 4 },
                 args: ['https://api.example.com/x', { method: 'GET' }]
@@ -415,35 +648,38 @@ describe('BrowserApi', () => {
 
         it('requestViaTab defaults options to {} when not provided', async () => {
             const executeScript = vi.fn(async () => [{ result: { ok: true, status: 200, text: '' } }]);
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => [{ id: 4 }] },
                 scripting: { executeScript }
             });
-            await api.requestViaTab('https://api.example.com/x', undefined, 'mangalib');
+            const host = getHost();
+            await host.requestViaTab('https://api.example.com/x', undefined, 'mangalib');
             expect(executeScript).toHaveBeenCalledWith(expect.objectContaining({
                 args: ['https://api.example.com/x', {}]
             }));
         });
 
         it('requestViaTab returns an error result when executeScript yields no result', async () => {
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => [{ id: 5 }] },
                 scripting: { executeScript: async () => [{ result: null }] }
             });
-            const result = await api.requestViaTab('https://api.example.com/x', {}, 'mangalib');
+            const host = getHost();
+            const result = await host.requestViaTab('https://api.example.com/x', {}, 'mangalib');
             expect(result).toEqual({ ok: false, noTab: false, error: 'No result from tab' });
         });
 
         it('requestViaTab returns an error and warns when executeScript throws', async () => {
-            const api = await setupWithBrowser({
+            await setupWithBrowser({
                 runtime: {},
                 tabs: { query: async () => [{ id: 6 }] },
                 scripting: { executeScript: async () => { throw new Error('script boom'); } }
             });
             const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-            const result = await api.requestViaTab('https://api.example.com/x', {}, 'mangalib');
+            const host = getHost();
+            const result = await host.requestViaTab('https://api.example.com/x', {}, 'mangalib');
             expect(result).toEqual({ ok: false, noTab: false, error: 'Error: script boom' });
             expect(warnSpy).toHaveBeenCalledWith('[BrowserApi] requestViaTab failed:', 'script boom');
             warnSpy.mockRestore();
@@ -453,7 +689,7 @@ describe('BrowserApi', () => {
             let capturedFunc;
 
             beforeEach(async () => {
-                const api = await setupWithBrowser({
+                await setupWithBrowser({
                     runtime: {},
                     tabs: { query: async () => [{ id: 1 }] },
                     scripting: {
@@ -463,7 +699,7 @@ describe('BrowserApi', () => {
                         }
                     }
                 });
-                await api.requestViaTab('https://api.example.com/x', {}, 'mangalib');
+                await getHost().requestViaTab('https://api.example.com/x', {}, 'mangalib');
             });
 
             afterEach(() => {
@@ -487,37 +723,5 @@ describe('BrowserApi', () => {
                 expect(result).toEqual({ ok: false, status: 0, text: '', error: 'Error: network fail' });
             });
         });
-    });
-});
-
-describe('extensionOrigin / isExtensionUrl', () => {
-    beforeEach(() => {
-        clearBrowserGlobals();
-    });
-
-    it.each([
-        ['moz-extension://uuid/', 'moz-extension://uuid'],
-        ['chrome-extension://abcdef/', 'chrome-extension://abcdef']
-    ])('Takes the origin from runtime.getURL(%s) without URL.origin', async (base, origin) => {
-        global.browser = { runtime: { getURL: path => `${base}${path}` } };
-        const { extensionOrigin } = await loadBrowserApi();
-        expect(extensionOrigin()).toBe(origin);
-    });
-
-    it('Returns null without a runtime', async () => {
-        const { extensionOrigin, isExtensionUrl } = await loadBrowserApi();
-        expect(extensionOrigin()).toBeNull();
-        expect(isExtensionUrl('moz-extension://uuid/popup.html')).toBe(false);
-    });
-
-    it('Accepts only pages of this extension', async () => {
-        global.browser = { runtime: { getURL: path => `moz-extension://uuid/${path}` } };
-        const { isExtensionUrl } = await loadBrowserApi();
-        expect(isExtensionUrl('moz-extension://uuid/popup.html?download=true')).toBe(true);
-        expect(isExtensionUrl('moz-extension://uuid.evil/popup.html')).toBe(false);
-        expect(isExtensionUrl('moz-extension://other/popup.html')).toBe(false);
-        expect(isExtensionUrl('https://mangalib.me/')).toBe(false);
-        expect(isExtensionUrl('null')).toBe(false);
-        expect(isExtensionUrl(undefined)).toBe(false);
     });
 });

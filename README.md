@@ -17,6 +17,7 @@
 > [!IMPORTANT]
 > **DloadLIB — неофициальный форк [DownloadLib](https://github.com/ivanvit100/DownloadLib)**
 > (автор — [ivanvit100](https://github.com/ivanvit100)), основанный на версии 1.0.11.
+> Код сгенерирован ИИ.
 
 ---
 

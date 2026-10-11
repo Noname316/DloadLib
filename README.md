@@ -17,8 +17,6 @@
 > [!IMPORTANT]
 > **DloadLIB — неофициальный форк [DownloadLib](https://github.com/ivanvit100/DownloadLib)**
 > (автор — [ivanvit100](https://github.com/ivanvit100)), основанный на версии 1.0.11.
-> Автор оригинала к этому форку отношения не имеет: об ошибках DloadLIB пишите
-> в [Issues этого репозитория](../../issues), а не оригинала.
 
 ---
 
